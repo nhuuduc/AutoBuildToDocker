@@ -24,6 +24,35 @@ func RegisterCommands(bot *tele.Bot) {
 	bot.Handle("/help", handleStart) // alias
 }
 
+// RouteCommand dispatches a command string and args to the right handler.
+// Used by the @mention text handler in groups.
+func RouteCommand(cmd, args string, c tele.Context) error {
+	// Inject args into Message.Payload so handlers pick it up naturally
+	if msg := c.Message(); msg != nil {
+		msg.Payload = args
+	}
+	switch strings.ToLower(cmd) {
+	case "/start", "/help":
+		return handleStart(c)
+	case "/add":
+		return handleAdd(c)
+	case "/list":
+		return handleList(c)
+	case "/remove":
+		return handleRemove(c)
+	case "/build":
+		return handleBuild(c)
+	case "/builds":
+		return handleBuilds(c)
+	case "/status":
+		return handleStatus(c)
+	case "/settings":
+		return handleSettings(c)
+	default:
+		return c.Send("❓ Unknown command: `"+cmd+"`\\. Type `/help` for available commands\\.", tele.ModeMarkdownV2)
+	}
+}
+
 // ─── /start ──────────────────────────────────────────────────────────────────
 
 func handleStart(c tele.Context) error {

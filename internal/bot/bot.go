@@ -3,6 +3,7 @@ package bot
 import (
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/nhd/autobuildtodocker/internal/bot/handlers"
 	"github.com/nhd/autobuildtodocker/internal/config"
@@ -43,13 +44,18 @@ func New() (*tele.Bot, error) {
 		bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
 			return func(c tele.Context) error {
 				sender := c.Sender()
-				if sender == nil || !allowedSet[sender.ID] {
+				chat := c.Chat()
+
+				senderAllowed := sender != nil && allowedSet[sender.ID]
+				chatAllowed := chat != nil && allowedSet[chat.ID]
+
+				if !senderAllowed && !chatAllowed {
 					id := int64(0)
 					if sender != nil {
 						id = sender.ID
 					}
-					log.Printf("[Bot] Unauthorized access attempt from user %d", id)
-					return c.Send(fmt.Sprintf("⛔ Unauthorized\\. User ID `%d` is not allowed to use this bot\\.", id), tele.ModeMarkdownV2)
+					log.Printf("[Bot] Unauthorized access attempt from user %d in chat %d", id, chat.ID)
+					return c.Send(fmt.Sprintf("⛔ Unauthorized\\. User ID `%d` is not allowed\\.", id), tele.ModeMarkdownV2)
 				}
 				return next(c)
 			}
@@ -72,6 +78,36 @@ func New() (*tele.Bot, error) {
 	// Register all slash commands and callbacks
 	handlers.RegisterCommands(bot)
 	handlers.RegisterCallbacks(bot)
+
+	// ── @Mention handler for groups ──────────────────────────────────────
+	// Allows "@BotName /command args" format as alternative to "/command@BotName"
+	// Requires privacy mode OFF in BotFather for group non-command messages.
+	// Works automatically for commands (privacy mode ON) since commands are
+	// always delivered; OnText catches the @mention + text messages.
+	botUsername := strings.ToLower(bot.Me.Username)
+	bot.Handle(tele.OnText, func(c tele.Context) error {
+		text := strings.TrimSpace(c.Text())
+		prefix := "@" + botUsername + " "
+		if !strings.HasPrefix(strings.ToLower(text), strings.ToLower(prefix)) {
+			return nil // not addressed to this bot
+		}
+		rest := strings.TrimSpace(text[len(prefix):])
+		if rest == "" {
+			return handlers.RouteCommand("/start", "", c)
+		}
+		// Split into command and args
+		parts := strings.SplitN(rest, " ", 2)
+		cmd := parts[0]
+		args := ""
+		if len(parts) > 1 {
+			args = parts[1]
+		}
+		if !strings.HasPrefix(cmd, "/") {
+			cmd = "/" + cmd // allow "@bot help" as well as "@bot /help"
+		}
+		log.Printf("[Bot] @mention command: %s args: %q from %d", cmd, args, c.Sender().ID)
+		return handlers.RouteCommand(cmd, args, c)
+	})
 
 	// Initialize notification service with this bot
 	services.InitNotifications(bot)
