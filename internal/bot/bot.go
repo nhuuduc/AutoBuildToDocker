@@ -55,7 +55,7 @@ func New() (*tele.Bot, error) {
 						id = sender.ID
 					}
 					log.Printf("[Bot] Unauthorized access attempt from user %d in chat %d", id, chat.ID)
-					return c.Send(fmt.Sprintf("⛔ Unauthorized\\. User ID `%d` is not allowed\\.", id), tele.ModeMarkdownV2)
+					return c.Send(fmt.Sprintf("⛔ Unauthorized. User ID `%d` is not allowed.", id), tele.ModeMarkdown)
 				}
 				return next(c)
 			}

@@ -49,7 +49,7 @@ func RouteCommand(cmd, args string, c tele.Context) error {
 	case "/settings":
 		return handleSettings(c)
 	default:
-		return c.Send("❓ Unknown command: `"+cmd+"`\\. Type `/help` for available commands\\.", tele.ModeMarkdownV2)
+		return c.Send("❓ Unknown command: `"+cmd+"`. Type /help for available commands.", tele.ModeMarkdown)
 	}
 }
 
@@ -61,8 +61,8 @@ func handleStart(c tele.Context) error {
 		_ = db.UpsertUser(user.ID, user.Username, user.FirstName)
 	}
 	return c.Send(
-		"👋 *Welcome to Docker Build Bot\\!*\n\n"+
-			"I'll monitor your GitHub repositories and build Docker images automatically\\.\n\n"+
+		"👋 *Welcome to Docker Build Bot!*\n\n"+
+			"I'll monitor your GitHub repositories and build Docker images automatically.\n\n"+
 			"*Commands:*\n"+
 			"`/add <owner/repo>` — Add a repository\n"+
 			"`/list` — List your repositories\n"+
@@ -72,7 +72,7 @@ func handleStart(c tele.Context) error {
 			"`/status` — Show queue status\n"+
 			"`/settings` — Bot settings\n"+
 			"`/help` — Show this message",
-		tele.ModeMarkdownV2,
+		tele.ModeMarkdown,
 	)
 }
 
@@ -101,7 +101,7 @@ func handleAdd(c tele.Context) error {
 
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
-		return c.Send("Usage: `/add <owner/repo> [image\\-name]`", tele.ModeMarkdownV2)
+		return c.Send("Usage: `/add <owner/repo> [image-name]`", tele.ModeMarkdown)
 	}
 
 	if !services.IsGitHubConfigured() {
@@ -111,7 +111,7 @@ func handleAdd(c tele.Context) error {
 	parts := strings.Fields(args)
 	owner, repo, branch, ok := parseGitHubArg(parts[0])
 	if !ok {
-		return c.Send("❌ Invalid GitHub repository format. Use `owner/repo` or GitHub URL.", tele.ModeMarkdownV2)
+		return c.Send("❌ Invalid GitHub repository format. Use `owner/repo` or GitHub URL.", tele.ModeMarkdown)
 	}
 
 	_ = c.Send("🔍 Validating repository on GitHub...")
@@ -119,7 +119,7 @@ func handleAdd(c tele.Context) error {
 	ghRepo, err := services.ValidateRepo(owner, repo)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
-			return c.Send(fmt.Sprintf("❌ Repository not found: `%s/%s`", owner, repo), tele.ModeMarkdownV2)
+			return c.Send(fmt.Sprintf("❌ Repository not found: `%s/%s`", owner, repo), tele.ModeMarkdown)
 		}
 		return c.Send("❌ Error: " + err.Error())
 	}
@@ -143,8 +143,8 @@ func handleAdd(c tele.Context) error {
 	// Check existing
 	existing, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
 	if existing != nil {
-		return c.Send(fmt.Sprintf("ℹ️ Repository `%s/%s` is already tracked\\.\nBranch: `%s` | Image: `%s`",
-			owner, repo, existing.Branch, existing.ImageName), tele.ModeMarkdownV2)
+		return c.Send(fmt.Sprintf("ℹ️ Repository `%s/%s` is already tracked.\nBranch: `%s` | Image: `%s`",
+			owner, repo, existing.Branch, existing.ImageName), tele.ModeMarkdown)
 	}
 
 	_, err = db.CreateRepo(dbUser.ID, owner, repo, branch, "Dockerfile", imageName, "docker.io", 60)
@@ -154,12 +154,12 @@ func handleAdd(c tele.Context) error {
 
 	log.Printf("Repository added: %s/%s by @%s", owner, repo, user.Username)
 	return c.Send(fmt.Sprintf(
-		"✅ *Repository added\\!*\n\n"+
+		"✅ *Repository added!*\n\n"+
 			"📦 `%s/%s`\n"+
 			"🌿 Branch: `%s`\n"+
 			"🐳 Image: `%s`",
 		owner, repo, branch, imageName,
-	), tele.ModeMarkdownV2)
+	), tele.ModeMarkdown)
 }
 
 // ─── /list ───────────────────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ func handleList(c tele.Context) error {
 
 	repos, err := db.FindReposByUser(dbUser.ID)
 	if err != nil || len(repos) == 0 {
-		return c.Send("📭 No repositories tracked yet. Use `/add <owner/repo>`.", tele.ModeMarkdownV2)
+		return c.Send("📭 No repositories tracked yet. Use `/add <owner/repo>`.", tele.ModeMarkdown)
 	}
 
 	var sb strings.Builder
@@ -182,10 +182,10 @@ func handleList(c tele.Context) error {
 		if !r.IsActive {
 			status = "⏸️ Paused"
 		}
-		sb.WriteString(fmt.Sprintf("%d\\. `%s/%s`\n   Branch: `%s` | Image: `%s` | %s\n\n",
+		sb.WriteString(fmt.Sprintf("%d. `%s/%s`\n   Branch: `%s` | Image: `%s` | %s\n\n",
 			i+1, r.Owner, r.Repo, r.Branch, r.ImageName, status))
 	}
-	return c.Send(sb.String(), tele.ModeMarkdownV2)
+	return c.Send(sb.String(), tele.ModeMarkdown)
 }
 
 // ─── /remove ─────────────────────────────────────────────────────────────────
@@ -197,22 +197,22 @@ func handleRemove(c tele.Context) error {
 	}
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
-		return c.Send("Usage: `/remove <owner/repo>`", tele.ModeMarkdownV2)
+		return c.Send("Usage: `/remove <owner/repo>`", tele.ModeMarkdown)
 	}
 	owner, repo, _, ok := parseGitHubArg(args)
 	if !ok {
-		return c.Send("❌ Invalid format. Use `owner/repo`", tele.ModeMarkdownV2)
+		return c.Send("❌ Invalid format. Use `owner/repo`", tele.ModeMarkdown)
 	}
 
 	r, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
 	if r == nil {
-		return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not found.", owner, repo), tele.ModeMarkdownV2)
+		return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not found.", owner, repo), tele.ModeMarkdown)
 	}
 
 	if err := db.DeleteRepo(r.ID); err != nil {
 		return c.Send("❌ Failed to remove: " + err.Error())
 	}
-	return c.Send(fmt.Sprintf("✅ Removed `%s/%s`", owner, repo), tele.ModeMarkdownV2)
+	return c.Send(fmt.Sprintf("✅ Removed `%s/%s`", owner, repo), tele.ModeMarkdown)
 }
 
 // ─── /build ──────────────────────────────────────────────────────────────────
@@ -224,16 +224,16 @@ func handleBuild(c tele.Context) error {
 	}
 	args := strings.TrimSpace(c.Message().Payload)
 	if args == "" {
-		return c.Send("Usage: `/build <owner/repo>`", tele.ModeMarkdownV2)
+		return c.Send("Usage: `/build <owner/repo>`", tele.ModeMarkdown)
 	}
 	owner, repo, _, ok := parseGitHubArg(args)
 	if !ok {
-		return c.Send("❌ Invalid format.", tele.ModeMarkdownV2)
+		return c.Send("❌ Invalid format.", tele.ModeMarkdown)
 	}
 
 	r, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
 	if r == nil {
-		return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not tracked.", owner, repo), tele.ModeMarkdownV2)
+		return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not tracked.", owner, repo), tele.ModeMarkdown)
 	}
 
 	commitSHA, err := services.GetLatestCommit(owner, repo, r.Branch)
@@ -242,8 +242,8 @@ func handleBuild(c tele.Context) error {
 	}
 
 	services.AddToQueue(r.ID, fmt.Sprintf("%s/%s", owner, repo), commitSHA, r.ImageName)
-	return c.Send(fmt.Sprintf("✅ *Build queued\\!*\n\n📦 `%s/%s`\n🔗 Commit: `%s`",
-		owner, repo, commitSHA[:7]), tele.ModeMarkdownV2)
+	return c.Send(fmt.Sprintf("✅ *Build queued!*\n\n📦 `%s/%s`\n🔗 Commit: `%s`",
+		owner, repo, commitSHA[:7]), tele.ModeMarkdown)
 }
 
 // ─── /builds ─────────────────────────────────────────────────────────────────
@@ -260,11 +260,11 @@ func handleBuilds(c tele.Context) error {
 	if args != "" {
 		owner, repo, _, ok := parseGitHubArg(args)
 		if !ok {
-			return c.Send("❌ Invalid format.", tele.ModeMarkdownV2)
+			return c.Send("❌ Invalid format.", tele.ModeMarkdown)
 		}
 		r, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
 		if r == nil {
-			return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not tracked.", owner, repo), tele.ModeMarkdownV2)
+			return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not tracked.", owner, repo), tele.ModeMarkdown)
 		}
 		builds, _ = db.FindBuildsByRepo(r.ID, 10)
 	} else {
@@ -276,10 +276,12 @@ func handleBuilds(c tele.Context) error {
 	}
 
 	statusEmoji := map[string]string{
-		"pending":  "⏳",
-		"building": "⚙️",
-		"success":  "✅",
-		"failed":   "❌",
+		"pending":    "⏳",
+		"building":   "⚙️",
+		"dispatched": "🚀",
+		"success":    "✅",
+		"failed":     "❌",
+		"timeout":    "⏰",
 	}
 
 	var sb strings.Builder
@@ -290,10 +292,13 @@ func handleBuilds(c tele.Context) error {
 			sha = b.CommitSHA.String[:7]
 		}
 		emoji := statusEmoji[b.BuildStatus]
-		sb.WriteString(fmt.Sprintf("%d\\. %s `%s` — `%s`\n   %s\n\n",
+		if emoji == "" {
+			emoji = "❓"
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s `%s` — `%s`\n   %s\n\n",
 			i+1, emoji, sha, b.BuildStatus, b.StartedAt))
 	}
-	return c.Send(sb.String(), tele.ModeMarkdownV2)
+	return c.Send(sb.String(), tele.ModeMarkdown)
 }
 
 // ─── /status ─────────────────────────────────────────────────────────────────
@@ -304,11 +309,11 @@ func handleStatus(c tele.Context) error {
 		"📊 *Queue Status*\n\n"+
 			"Total: %d\n"+
 			"⏳ Queued: %d\n"+
-			"⚙️ Running: %d\n"+
+			"🚀 Dispatched: %d\n"+
 			"✅ Completed: %d\n"+
 			"❌ Failed: %d",
-		stats["total"], stats["queued"], stats["running"], stats["completed"], stats["failed"],
-	), tele.ModeMarkdownV2)
+		stats["total"], stats["queued"], stats["dispatched"], stats["completed"], stats["failed"],
+	), tele.ModeMarkdown)
 }
 
 // ─── /settings ───────────────────────────────────────────────────────────────
@@ -319,8 +324,12 @@ func handleSettings(c tele.Context) error {
 		return c.Send("Please run /start first.")
 	}
 	repos, _ := db.FindReposByUser(dbUser.ID)
+	suffix := "ies"
+	if len(repos) == 1 {
+		suffix = "y"
+	}
 	return c.Send(fmt.Sprintf(
-		"⚙️ *Settings*\n\nYou have %d repositor%s tracked\\.",
-		len(repos), map[bool]string{true: "y", false: "ies"}[len(repos) == 1],
-	), tele.ModeMarkdownV2)
+		"⚙️ *Settings*\n\nYou have %d repositor%s tracked.",
+		len(repos), suffix,
+	), tele.ModeMarkdown)
 }
