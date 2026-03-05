@@ -1,7 +1,9 @@
 package services
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -64,6 +66,35 @@ func getImageWithTag(imageName, tag string) string {
 	}
 }
 
+// runLogged runs a command and streams its output line-by-line to the Go log.
+// prefix is shown before each output line, e.g. "[Docker/git]".
+func runLogged(prefix string, args ...string) error {
+	cmd := exec.Command(args[0], args[1:]...)
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%s start failed: %w", args[0], err)
+	}
+
+	// Stream lines to log
+	go func() {
+		scanner := bufio.NewScanner(pr)
+		for scanner.Scan() {
+			log.Printf("%s %s", prefix, scanner.Text())
+		}
+		pr.Close() // Close the read end of the pipe when scanning is done
+	}()
+
+	err := cmd.Wait()
+	pw.Close() // Close the write end of the pipe after the command finishes
+	if err != nil {
+		return fmt.Errorf("%v failed: %w", args, err)
+	}
+	return nil
+}
+
 // cloneRepo clones the repository at a specific commit SHA.
 // Uses git init + fetch FETCH_HEAD to reliably fetch any specific commit by full SHA.
 func cloneRepo(repoFullName, commitSHA string) (string, error) {
@@ -78,29 +109,23 @@ func cloneRepo(repoFullName, commitSHA string) (string, error) {
 		return "", fmt.Errorf("mkdir failed: %w", err)
 	}
 
-	// git init + fetch specific SHA — works with full 40-char SHA on GitHub
-	// (GitHub supports uploadpack.allowReachableSHA1InWant for full SHAs)
+	prefix := fmt.Sprintf("[Docker/git %s]", repoFullName)
 	cmds := [][]string{
 		{"git", "init", cloneDir},
 		{"git", "-C", cloneDir, "remote", "add", "origin", gitURL},
 		{"git", "-C", cloneDir, "fetch", "--depth", "1", "origin", commitSHA},
 		{"git", "-C", cloneDir, "checkout", "FETCH_HEAD"},
 	}
-
-	var allOutput strings.Builder
 	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		out, err := cmd.CombinedOutput()
-		allOutput.Write(out)
-		if err != nil {
-			return "", fmt.Errorf("git command failed (%v): %w\n%s", args, err, out)
+		if err := runLogged(prefix, args...); err != nil {
+			return "", fmt.Errorf("git command failed: %w", err)
 		}
 	}
-	log.Printf("[Docker] Successfully cloned %s", repoFullName)
+	log.Printf("[Docker] ✅ Cloned %s", repoFullName)
 	return cloneDir, nil
 }
 
-// buildImage builds a Docker image.
+// buildImage builds a Docker image and streams output to log.
 func buildImage(contextDir, imageName, dockerfilePath string) error {
 	fullImage := getImageWithTag(imageName, "latest")
 	dockerfile := filepath.Join(contextDir, dockerfilePath)
@@ -110,12 +135,13 @@ func buildImage(contextDir, imageName, dockerfilePath string) error {
 	}
 
 	log.Printf("[Docker] Building image: %s", fullImage)
-	cmd := exec.Command("docker", "build", "-t", fullImage, "-f", dockerfile, contextDir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker build failed: %w\n%s", err, out)
+	prefix := fmt.Sprintf("[Docker/build %s]", imageName)
+	if err := runLogged(prefix,
+		"docker", "build", "--progress=plain", "-t", fullImage, "-f", dockerfile, contextDir,
+	); err != nil {
+		return fmt.Errorf("docker build failed: %w", err)
 	}
-	log.Printf("[Docker] Successfully built: %s", fullImage)
+	log.Printf("[Docker] ✅ Built: %s", fullImage)
 	return nil
 }
 
