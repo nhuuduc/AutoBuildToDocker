@@ -37,12 +37,13 @@ type ServerConfig struct {
 }
 
 type Config struct {
-	Telegram  TelegramConfig
-	Docker    DockerConfig
-	GitHub    GitHubConfig
-	DB        DbConfig
-	Scheduler SchedulerConfig
-	Server    ServerConfig
+	Telegram    TelegramConfig
+	Docker      DockerConfig
+	GitHub      GitHubConfig
+	DB          DbConfig
+	Scheduler   SchedulerConfig
+	Server      ServerConfig
+	BuilderRepo string // owner/repo containing the GitHub Actions workflow
 }
 
 var App *Config
@@ -109,6 +110,7 @@ func Load() *Config {
 		Server: ServerConfig{
 			Port: port,
 		},
+		BuilderRepo: os.Getenv("BUILDER_REPO"),
 	}
 
 	if App.Telegram.BotToken == "" {

@@ -17,6 +17,8 @@ services:
       - WORK_DIR=/builds
       - CHECK_INTERVAL_MINUTES=${CHECK_INTERVAL_MINUTES:-60}
       - PORT=3000
+      - BUILDER_REPO=${BUILDER_REPO:-nhuuduc/AutoBuildToDocker}
+      - ALLOWED_TELEGRAM_IDS=${ALLOWED_TELEGRAM_IDS:-}
     volumes:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock

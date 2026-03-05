@@ -1,0 +1,82 @@
+name: Build & Push Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Source GitHub repo (e.g. RightNow-AI/openfang)"
+        required: true
+      commit_sha:
+        description: "Commit SHA to checkout"
+        required: true
+      image_name:
+        description: "Docker image name (e.g. openfang)"
+        required: true
+      telegram_chat_id:
+        description: "Telegram chat ID to notify"
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    name: Build & Push ${{ inputs.image_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.commit_sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}:latest
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}:${{ inputs.commit_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Notify Telegram — Success
+        if: success()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "chat_id": "${{ inputs.telegram_chat_id }}",
+              "text": "✅ *Build Successful\\!*\n\n📦 *Repo:* `${{ inputs.repo }}`\n🔗 *Commit:* `'"${COMMIT_SHORT}"'`\n🐳 *Image:* `${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}:latest`\n🔗 [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "parse_mode": "MarkdownV2"
+            }'
+        env:
+          COMMIT_SHORT: ${{ inputs.commit_sha }}
+
+      - name: Notify Telegram — Failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "chat_id": "${{ inputs.telegram_chat_id }}",
+              "text": "❌ *Build Failed*\n\n📦 *Repo:* `${{ inputs.repo }}`\n🔗 *Commit:* `${{ inputs.commit_sha }}`\n🔗 [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "parse_mode": "MarkdownV2"
+            }'

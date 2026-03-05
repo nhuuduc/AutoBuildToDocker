@@ -1,11 +1,14 @@
 package services
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/nhd/autobuildtodocker/internal/config"
 )
@@ -198,4 +201,104 @@ func GetFileContent(owner, repo, path, branch string) (string, error) {
 		return string(decoded), nil
 	}
 	return "", nil
+}
+
+// ─── GitHub Actions ──────────────────────────────────────────────────────────
+
+// WorkflowRun holds the status of a GitHub Actions workflow run.
+type WorkflowRun struct {
+	ID         int64  `json:"id"`
+	Status     string `json:"status"`     // queued, in_progress, completed
+	Conclusion string `json:"conclusion"` // success, failure, cancelled, ...
+	HTMLURL    string `json:"html_url"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// TriggerWorkflowDispatch triggers a workflow_dispatch event on builderRepo.
+// builderRepo format: "owner/repo"
+// workflowFile: e.g. "docker-build.yml"
+// ref: branch to use, e.g. "main"
+// inputs: key/value inputs for the workflow
+func TriggerWorkflowDispatch(builderRepo, workflowFile, ref string, inputs map[string]string) error {
+	if config.App.GitHub.Token == "" {
+		return fmt.Errorf("GITHUB_TOKEN is required to trigger GitHub Actions")
+	}
+	if builderRepo == "" {
+		return fmt.Errorf("BUILDER_REPO is not configured")
+	}
+
+	parts := strings.SplitN(builderRepo, "/", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid BUILDER_REPO format, expected owner/repo: %s", builderRepo)
+	}
+	owner, repo := parts[0], parts[1]
+
+	payload := map[string]any{
+		"ref":    ref,
+		"inputs": inputs,
+	}
+	body, _ := json.Marshal(payload)
+
+	url := fmt.Sprintf("%s/repos/%s/%s/actions/workflows/%s/dispatches",
+		githubAPIBase, owner, repo, workflowFile)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	for k, v := range githubHeaders() {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 204 No Content = success
+	if resp.StatusCode == 204 {
+		return nil
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("workflow dispatch failed (%d): %s", resp.StatusCode, respBody)
+}
+
+// GetLatestWorkflowRun returns the most recent run of a workflow in builderRepo.
+// It retries briefly to find a run created after the given time (to avoid stale runs).
+func GetLatestWorkflowRun(builderRepo, workflowFile string, after time.Time) (*WorkflowRun, error) {
+	parts := strings.SplitN(builderRepo, "/", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid BUILDER_REPO: %s", builderRepo)
+	}
+	owner, repo := parts[0], parts[1]
+
+	url := fmt.Sprintf("%s/repos/%s/%s/actions/workflows/%s/runs?per_page=5",
+		githubAPIBase, owner, repo, workflowFile)
+
+	resp, err := githubGet(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GitHub API error: %d", resp.StatusCode)
+	}
+
+	var data struct {
+		WorkflowRuns []WorkflowRun `json:"workflow_runs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	for i := range data.WorkflowRuns {
+		run := &data.WorkflowRuns[i]
+		t, err := time.Parse(time.RFC3339, run.CreatedAt)
+		if err != nil || t.Before(after) {
+			continue
+		}
+		return run, nil
+	}
+	return nil, nil
 }
