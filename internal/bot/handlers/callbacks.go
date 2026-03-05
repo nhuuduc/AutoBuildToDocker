@@ -26,6 +26,12 @@ func handleCallback(c tele.Context) error {
 	// Strip leading \f that telebot adds
 	data = strings.TrimPrefix(data, "\f")
 
+	// When using InlineButton.Unique, telebot prepends "{unique}|" before the actual data.
+	// e.g. "mode_local|mode:local:owner/repo:sha" → strip to "mode:local:owner/repo:sha"
+	if idx := strings.Index(data, "|"); idx != -1 {
+		data = data[idx+1:]
+	}
+
 	switch {
 	case strings.HasPrefix(data, "build:"):
 		return handleBuildCallback(c, data)
