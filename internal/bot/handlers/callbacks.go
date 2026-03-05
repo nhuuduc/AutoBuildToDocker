@@ -127,36 +127,34 @@ func handleModeCallback(c tele.Context, data string) error {
 		fullSHA = sha12
 	}
 
-	if buildMode == "local" {
-		// Store pending build and show feature selection menu
-		pb := &PendingBuild{
-			RepoID:       repoData.ID,
-			RepoFullName: repoFullName,
-			FullSHA:      fullSHA,
-			SHA12:        sha12,
-			ImageName:    repoData.ImageName,
-			Features:     map[string]bool{},
-		}
-		StorePending(pb)
-
-		editText := fmt.Sprintf(
-			"🖥️ *Local Build:* `%s`\n🔗 Commit: `%s`\n\n🛠️ *Select optional features:*",
-			repoFullName, sha12[:min(7, len(sha12))],
-		)
-		kb := BuildFeatureKeyboard(pb)
-		_ = c.Edit(editText, tele.ModeMarkdown, kb)
-		return c.Respond(&tele.CallbackResponse{Text: "Choose features →"})
+	modeEmoji := "🖥️"
+	if buildMode == "actions" {
+		modeEmoji = "🚀"
 	}
 
-	// GitHub Actions — queue immediately
-	services.AddToQueue(repoData.ID, repoFullName, fullSHA, repoData.ImageName, "actions")
+	// Both modes show feature selection menu
+	pb := &PendingBuild{
+		RepoID:       repoData.ID,
+		RepoFullName: repoFullName,
+		FullSHA:      fullSHA,
+		SHA12:        sha12,
+		ImageName:    repoData.ImageName,
+		BuildMode:    buildMode,
+		Features:     map[string]bool{},
+	}
+	StorePending(pb)
 
-	editText := fmt.Sprintf("🚀 *Build Queued · GitHub Actions*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`",
-		repoFullName, sha12[:min(7, len(sha12))])
-	_ = c.Edit(editText, tele.ModeMarkdown)
-
-	log.Printf("[Callbacks] Actions build queued for %s @ %s by user %d", repoFullName, sha12, sender.ID)
-	return c.Respond(&tele.CallbackResponse{Text: "✅ Build queued!"})
+	modeLabel := "Local Server"
+	if buildMode == "actions" {
+		modeLabel = "GitHub Actions"
+	}
+	editText := fmt.Sprintf(
+		"%s *%s Build:* `%s`\n🔗 Commit: `%s`\n\n🛠️ *Select optional features:*",
+		modeEmoji, modeLabel, repoFullName, sha12[:min(7, len(sha12))],
+	)
+	kb := BuildFeatureKeyboard(pb)
+	_ = c.Edit(editText, tele.ModeMarkdown, kb)
+	return c.Respond(&tele.CallbackResponse{Text: "Choose features →"})
 }
 
 // ── feat: ─────────────────────────────────────────────────────────────────────
@@ -231,7 +229,7 @@ func handleFeatCallback(c tele.Context, data string) error {
 			}
 		}
 
-		services.AddToQueueWithFeatures(pb.RepoID, pb.RepoFullName, pb.FullSHA, pb.ImageName, "local", selectedFeatures)
+		services.AddToQueueWithFeatures(pb.RepoID, pb.RepoFullName, pb.FullSHA, pb.ImageName, pb.BuildMode, selectedFeatures)
 		DeletePending(repoFull, sha12)
 
 		featDesc := "none"

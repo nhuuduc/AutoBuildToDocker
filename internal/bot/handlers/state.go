@@ -15,6 +15,7 @@ type PendingBuild struct {
 	FullSHA      string // full 40-char SHA
 	SHA12        string // 12-char truncated (used as map key suffix)
 	ImageName    string
+	BuildMode    string          // "local" or "actions"
 	Features     map[string]bool // feature key → selected
 }
 

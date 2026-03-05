@@ -15,6 +15,10 @@ on:
       telegram_chat_id:
         description: "Telegram chat ID to notify"
         required: true
+      features:
+        description: "Comma-separated optional features (e.g. python3,playwright,nodejs,ffmpeg)"
+        required: false
+        default: ""
 
 env:
   REGISTRY: ghcr.io
@@ -65,6 +69,36 @@ jobs:
           sbom: false
           cache-from: type=gha,scope=${{ matrix.slug }}-${{ inputs.repo }}
           cache-to: type=gha,scope=${{ matrix.slug }}-${{ inputs.repo }},mode=max
+
+      - name: Build feature addon layer
+        if: inputs.features != ''
+        env:
+          FEATURES: ${{ inputs.features }}
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}:${{ matrix.slug }}-${{ inputs.commit_sha }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, subprocess, sys
+          image = os.environ["IMAGE"]
+          feature_cmds = {
+            "python3":    ["RUN apk add --no-cache python3 py3-pip"],
+            "playwright": ["RUN apk add --no-cache python3 py3-pip chromium chromium-chromedriver",
+                           "RUN pip3 install --break-system-packages playwright",
+                           "RUN playwright install chromium"],
+            "nodejs":     ["RUN apk add --no-cache nodejs npm"],
+            "ffmpeg":     ["RUN apk add --no-cache ffmpeg"],
+          }
+          features = [f.strip() for f in os.environ["FEATURES"].split(",") if f.strip()]
+          lines = [f"FROM {image}"]
+          for feat in features:
+              lines.extend(feature_cmds.get(feat, []))
+          dockerfile = "\n".join(lines) + "\n"
+          with open("/tmp/Dockerfile.addon", "w") as f:
+              f.write(dockerfile)
+          print("Dockerfile.addon:\n" + dockerfile)
+          PYEOF
+          docker build --progress=plain -t "${IMAGE}" -f /tmp/Dockerfile.addon /tmp
+          docker push "${IMAGE}"
+          echo "✅ Addon layer pushed: ${IMAGE}"
 
   # ── Merge into multi-arch manifest + notify ────────────────────────────────
   merge:

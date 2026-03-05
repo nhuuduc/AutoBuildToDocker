@@ -263,6 +263,7 @@ func processActionsBuild(job *BuildJob) {
 		"commit_sha":       job.CommitSHA,
 		"image_name":       imageName,
 		"telegram_chat_id": fmt.Sprintf("%d", job.ChatID),
+		"features":         strings.Join(job.Features, ","),
 	})
 	if err != nil {
 		log.Printf("[Queue] Dispatch failed for %s: %v", job.RepoName, err)
