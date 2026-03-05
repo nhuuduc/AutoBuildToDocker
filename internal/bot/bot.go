@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/nhd/autobuildtodocker/internal/bot/handlers"
@@ -29,6 +30,31 @@ func New() (*tele.Bot, error) {
 
 	// Recovery middleware
 	bot.Use(middleware.Recover())
+
+	// ── Whitelist middleware ──────────────────────────────────────────────
+	// If ALLOWED_TELEGRAM_IDS is set, only those users can use the bot.
+	if len(cfg.Telegram.AllowedUserIDs) > 0 {
+		allowedSet := make(map[int64]bool, len(cfg.Telegram.AllowedUserIDs))
+		for _, id := range cfg.Telegram.AllowedUserIDs {
+			allowedSet[id] = true
+		}
+		log.Printf("[Bot] Whitelist active: %v", cfg.Telegram.AllowedUserIDs)
+
+		bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
+			return func(c tele.Context) error {
+				sender := c.Sender()
+				if sender == nil || !allowedSet[sender.ID] {
+					id := int64(0)
+					if sender != nil {
+						id = sender.ID
+					}
+					log.Printf("[Bot] Unauthorized access attempt from user %d", id)
+					return c.Send(fmt.Sprintf("⛔ Unauthorized. User ID `%d` is not allowed to use this bot.", id), tele.ModeMarkdownV2)
+				}
+				return next(c)
+			}
+		})
+	}
 
 	// Logging middleware
 	bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {

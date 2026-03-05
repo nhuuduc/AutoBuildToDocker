@@ -4,12 +4,14 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
 
 type TelegramConfig struct {
-	BotToken string
+	BotToken       string
+	AllowedUserIDs []int64 // empty = allow all
 }
 
 type DockerConfig struct {
@@ -74,9 +76,21 @@ func Load() *Config {
 		registry = "docker.io"
 	}
 
+	// Parse allowed Telegram user IDs
+	allowedIDs := []int64{}
+	if v := os.Getenv("ALLOWED_TELEGRAM_IDS"); v != "" {
+		for _, part := range strings.Split(v, ",") {
+			part = strings.TrimSpace(part)
+			if id, err := strconv.ParseInt(part, 10, 64); err == nil {
+				allowedIDs = append(allowedIDs, id)
+			}
+		}
+	}
+
 	App = &Config{
 		Telegram: TelegramConfig{
-			BotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+			BotToken:       os.Getenv("TELEGRAM_BOT_TOKEN"),
+			AllowedUserIDs: allowedIDs,
 		},
 		Docker: DockerConfig{
 			Registry: registry,
