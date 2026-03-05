@@ -90,12 +90,19 @@ jobs:
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}"
           SHA="${{ inputs.commit_sha }}"
+          # Multi-arch manifest (amd64 + arm64)
           docker buildx imagetools create \
             --tag "${IMAGE}:latest" \
             --tag "${IMAGE}:${SHA}" \
             "${IMAGE}:linux-amd64-${SHA}" \
             "${IMAGE}:linux-arm64-${SHA}"
-          echo "✅ Multi-arch manifest pushed: ${IMAGE}:latest"
+          # Explicit x86-only tag
+          docker buildx imagetools create \
+            --tag "${IMAGE}:amd64" \
+            "${IMAGE}:linux-amd64-${SHA}"
+          echo "✅ Images pushed:"
+          echo "   ${IMAGE}:latest  (amd64 + arm64)"
+          echo "   ${IMAGE}:amd64   (x86 only)"
 
       - name: Notify Telegram — Success
         run: |
