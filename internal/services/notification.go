@@ -77,9 +77,15 @@ func NotifyUser(telegramID int64, update UpdateNotification) error {
 		)
 	}
 
+	// Truncate SHA to 12 chars — Telegram callback data limit is 64 bytes.
+	// build:<repo>:<sha12> e.g. "build:zeroclaw-labs/zeroclaw:4705a74abc12" = 44 bytes max
+	sha12 := update.SHA
+	if len(sha12) > 12 {
+		sha12 = sha12[:12]
+	}
 	markup = &tele.ReplyMarkup{}
 	buildBtn := markup.Data("🔨 Build Now", "build_trigger",
-		fmt.Sprintf("build:%s:%s", update.Repo, update.SHA))
+		fmt.Sprintf("build:%s:%s", update.Repo, sha12))
 	skipBtn := markup.Data("Skip", "skip_trigger",
 		fmt.Sprintf("skip:%s", update.Repo))
 	markup.Inline(markup.Row(buildBtn, skipBtn))

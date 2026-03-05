@@ -243,16 +243,23 @@ func handleBuild(c tele.Context) error {
 
 	repoFull := fmt.Sprintf("%s/%s", owner, repo)
 
+	// Truncate SHA to 12 chars — Telegram callback data limit is 64 bytes.
+	// mode:actions:<repo>:<sha12> e.g. "mode:actions:zeroclaw-labs/zeroclaw:4705a74abc12" = 48 bytes
+	sha12 := commitSHA
+	if len(sha12) > 12 {
+		sha12 = sha12[:12]
+	}
+
 	// Inline keyboard: choose build mode
 	btnLocal := tele.InlineButton{
 		Text:   "🖥️ Local Server",
 		Unique: "mode_local",
-		Data:   fmt.Sprintf("mode:local:%s:%s", repoFull, commitSHA),
+		Data:   fmt.Sprintf("mode:local:%s:%s", repoFull, sha12),
 	}
 	btnActions := tele.InlineButton{
 		Text:   "🚀 GitHub Actions",
 		Unique: "mode_actions",
-		Data:   fmt.Sprintf("mode:actions:%s:%s", repoFull, commitSHA),
+		Data:   fmt.Sprintf("mode:actions:%s:%s", repoFull, sha12),
 	}
 
 	kb := &tele.ReplyMarkup{}
