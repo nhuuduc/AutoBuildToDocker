@@ -21,7 +21,8 @@ type BuildJob struct {
 	ChatID       int64 // Telegram user to notify
 	BuildID      int64 // DB row ID
 	DispatchedAt time.Time
-	BuildMode    string // "local" or "actions"
+	BuildMode    string   // "local" or "actions"
+	Features     []string // optional addon features for local builds
 }
 
 // ─── Queue ───────────────────────────────────────────────────────────────────
@@ -62,10 +63,14 @@ func GetQueueStats() map[string]int {
 // AddToQueue enqueues a new build job.
 // buildMode: "local" = build on this server, "actions" = dispatch to GitHub Actions.
 func AddToQueue(repoID int64, repoName, commitSHA, imageName, buildMode string) {
+	AddToQueueWithFeatures(repoID, repoName, commitSHA, imageName, buildMode, nil)
+}
+
+// AddToQueueWithFeatures enqueues a build job with optional addon features (local mode only).
+func AddToQueueWithFeatures(repoID int64, repoName, commitSHA, imageName, buildMode string, features []string) {
 	if buildMode == "" {
 		buildMode = "actions"
 	}
-	// Get user Telegram ID from DB
 	repo, err := db.FindRepoByID(repoID)
 	if err != nil || repo == nil {
 		log.Printf("[Queue] Cannot find repo %d: %v", repoID, err)
@@ -91,6 +96,7 @@ func AddToQueue(repoID int64, repoName, commitSHA, imageName, buildMode string) 
 		ChatID:    user.TelegramID,
 		BuildID:   buildID,
 		BuildMode: buildMode,
+		Features:  features,
 	}
 
 	statsMu.Lock()
@@ -163,19 +169,54 @@ func processLocalBuild(job *BuildJob) {
 	statsMu.Unlock()
 
 	if result.Success {
+		// Build addon layer if features were selected
+		if len(job.Features) > 0 {
+			_ = SendBuildStatus(job.ChatID, BuildStatus{
+				Repo:    job.RepoName,
+				Status:  "running",
+				Message: fmt.Sprintf("🛠️ Installing features: %s...", strings.Join(job.Features, ", ")),
+			})
+			if err := BuildAddonLayer(job.ImageName, job.Features); err != nil {
+				log.Printf("[Queue] Addon build failed for %s: %v", job.RepoName, err)
+				_ = db.UpdateBuildStatus(job.BuildID, "failed", err.Error())
+				statsMu.Lock()
+				stats["dispatched"]--
+				stats["failed"]++
+				statsMu.Unlock()
+				_ = SendBuildStatus(job.ChatID, BuildStatus{
+					Repo:    job.RepoName,
+					Status:  "failed",
+					Message: "❌ Feature addon build failed: " + err.Error(),
+				})
+				return
+			}
+			// Re-push with addon layer
+			if pushedImage, pushErr := pushImage(job.ImageName); pushErr != nil {
+				log.Printf("[Queue] Addon push failed for %s: %v", job.RepoName, pushErr)
+			} else {
+				result.ImageName = pushedImage
+			}
+		}
+
 		_ = db.UpdateBuildStatus(job.BuildID, "success", "")
 		statsMu.Lock()
+		stats["dispatched"]--
 		stats["completed"]++
 		statsMu.Unlock()
+		featMsg := ""
+		if len(job.Features) > 0 {
+			featMsg = fmt.Sprintf(" (+%s)", strings.Join(job.Features, ", "))
+		}
 		_ = SendBuildStatus(job.ChatID, BuildStatus{
 			Repo:      job.RepoName,
 			Status:    "success",
 			ImageName: result.ImageName,
-			Message:   "✅ Local build & push completed!",
+			Message:   "✅ Local build & push completed!" + featMsg,
 		})
 	} else {
 		_ = db.UpdateBuildStatus(job.BuildID, "failed", result.Error)
 		statsMu.Lock()
+		stats["dispatched"]--
 		stats["failed"]++
 		statsMu.Unlock()
 		_ = SendBuildStatus(job.ChatID, BuildStatus{

@@ -39,12 +39,16 @@ func handleCallback(c tele.Context) error {
 		return handleSkipCallback(c, data)
 	case strings.HasPrefix(data, "mode:"):
 		return handleModeCallback(c, data)
+	case strings.HasPrefix(data, "feat:"):
+		return handleFeatCallback(c, data)
 	default:
 		return c.Respond(&tele.CallbackResponse{Text: "Unknown action"})
 	}
 }
 
-// handleBuildCallback — format: build:owner/repo:commitSHA
+// ── build: ────────────────────────────────────────────────────────────────────
+
+// handleBuildCallback — format: build:owner/repo:commitSHA (from scheduler notification)
 func handleBuildCallback(c tele.Context, data string) error {
 	parts := strings.SplitN(data, ":", 3)
 	if len(parts) < 3 {
@@ -77,24 +81,23 @@ func handleBuildCallback(c tele.Context, data string) error {
 	_ = db.DeleteConfirmationsByRepo(repoData.ID)
 
 	editText := fmt.Sprintf("✅ *Build Queued*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`",
-		repoFullName, commitSHA[:7])
-	_ = c.Edit(editText, tele.ModeMarkdownV2)
+		repoFullName, commitSHA)
+	_ = c.Edit(editText, tele.ModeMarkdown)
 
 	return c.Respond(&tele.CallbackResponse{Text: "Build queued!"})
 }
 
-// handleModeCallback — format: mode:local:owner/repo:commitSHA
-//
-//	stores build mode choice and queues the job.
+// ── mode: ─────────────────────────────────────────────────────────────────────
+
+// handleModeCallback — format: mode:local:owner/repo:sha12 or mode:actions:owner/repo:sha12
 func handleModeCallback(c tele.Context, data string) error {
-	// data = "mode:local:owner/repo:commitSHA" or "mode:actions:owner/repo:..."
 	parts := strings.SplitN(data, ":", 4)
 	if len(parts) < 4 {
 		return c.Respond(&tele.CallbackResponse{Text: "Invalid mode request"})
 	}
 	buildMode := parts[1]    // "local" or "actions"
 	repoFullName := parts[2] // "owner/repo"
-	commitSHA := parts[3]
+	sha12 := parts[3]
 
 	split := strings.SplitN(repoFullName, "/", 2)
 	if len(split) < 2 {
@@ -117,33 +120,138 @@ func handleModeCallback(c tele.Context, data string) error {
 		return c.Respond(&tele.CallbackResponse{Text: "Repository not found"})
 	}
 
-	// Resolve partial SHA (12 chars from button data) to full 40-char SHA.
-	// Git and GitHub Actions both need the full SHA for reliable fetches.
-	fullSHA, err := services.ResolveCommitSHA(owner, repo, commitSHA)
+	// Resolve short SHA → full 40-char SHA
+	fullSHA, err := services.ResolveCommitSHA(owner, repo, sha12)
 	if err != nil {
-		log.Printf("[Callbacks] Could not resolve SHA %s for %s: %v — using partial", commitSHA, repoFullName, err)
-		fullSHA = commitSHA // fallback: use what we have
+		log.Printf("[Callbacks] Could not resolve SHA %s for %s: %v — using partial", sha12, repoFullName, err)
+		fullSHA = sha12
 	}
 
-	services.AddToQueue(repoData.ID, repoFullName, fullSHA, repoData.ImageName, buildMode)
-
-	modeLabel := "🚀 GitHub Actions"
 	if buildMode == "local" {
-		modeLabel = "🖥️ Local Server"
+		// Store pending build and show feature selection menu
+		pb := &PendingBuild{
+			RepoID:       repoData.ID,
+			RepoFullName: repoFullName,
+			FullSHA:      fullSHA,
+			SHA12:        sha12,
+			ImageName:    repoData.ImageName,
+			Features:     map[string]bool{},
+		}
+		StorePending(pb)
+
+		editText := fmt.Sprintf(
+			"🖥️ *Local Build:* `%s`\n🔗 Commit: `%s`\n\n🛠️ *Select optional features:*",
+			repoFullName, sha12[:min(7, len(sha12))],
+		)
+		kb := BuildFeatureKeyboard(pb)
+		_ = c.Edit(editText, tele.ModeMarkdown, kb)
+		return c.Respond(&tele.CallbackResponse{Text: "Choose features →"})
 	}
 
-	shortSHA := commitSHA
-	if len(commitSHA) > 7 {
-		shortSHA = commitSHA[:7]
-	}
+	// GitHub Actions — queue immediately
+	services.AddToQueue(repoData.ID, repoFullName, fullSHA, repoData.ImageName, "actions")
 
-	editText := fmt.Sprintf("✅ *Build Queued* \u00b7 %s\n\n📦 Repository: `%s`\n🔗 Commit: `%s`",
-		modeLabel, repoFullName, shortSHA)
+	editText := fmt.Sprintf("🚀 *Build Queued · GitHub Actions*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`",
+		repoFullName, sha12[:min(7, len(sha12))])
 	_ = c.Edit(editText, tele.ModeMarkdown)
 
-	log.Printf("[Callbacks] Mode selected: %s for %s @ %s by user %d", buildMode, repoFullName, shortSHA, sender.ID)
+	log.Printf("[Callbacks] Actions build queued for %s @ %s by user %d", repoFullName, sha12, sender.ID)
 	return c.Respond(&tele.CallbackResponse{Text: "✅ Build queued!"})
 }
+
+// ── feat: ─────────────────────────────────────────────────────────────────────
+
+// handleFeatCallback — format: feat:toggle:owner/repo:sha12:featureKey or feat:build:owner/repo:sha12
+func handleFeatCallback(c tele.Context, data string) error {
+	parts := strings.SplitN(data, ":", 3)
+	if len(parts) < 3 {
+		return c.Respond(&tele.CallbackResponse{Text: "Invalid feature request"})
+	}
+	action := parts[1] // "toggle" or "build"
+	rest := parts[2]   // "owner/repo:sha12[:featureKey]"
+
+	switch action {
+	case "toggle":
+		// rest = "owner/repo:sha12:featureKey"
+		lastColon := strings.LastIndex(rest, ":")
+		if lastColon < 0 {
+			return c.Respond(&tele.CallbackResponse{Text: "Invalid toggle data"})
+		}
+		pbKey := rest[:lastColon] // "owner/repo:sha12"
+		featureKey := rest[lastColon+1:]
+
+		// pbKey format = "owner/repo:sha12"
+		colonIdx := strings.LastIndex(pbKey, ":")
+		repoFull := pbKey[:colonIdx]
+		sha12 := pbKey[colonIdx+1:]
+
+		pb := GetPending(repoFull, sha12)
+		if pb == nil {
+			return c.Respond(&tele.CallbackResponse{Text: "Session expired. Please /build again."})
+		}
+
+		// Toggle feature
+		pb.Features[featureKey] = !pb.Features[featureKey]
+		label := featureKey
+		if f := services.FeatureByKey(featureKey); f != nil {
+			label = f.Label
+		}
+		status := "off"
+		if pb.Features[featureKey] {
+			status = "on"
+		}
+
+		kb := BuildFeatureKeyboard(pb)
+		editText := fmt.Sprintf(
+			"🖥️ *Local Build:* `%s`\n🔗 Commit: `%s`\n\n🛠️ *Select optional features:*",
+			repoFull, sha12[:min(7, len(sha12))],
+		)
+		_ = c.Edit(editText, tele.ModeMarkdown, kb)
+		return c.Respond(&tele.CallbackResponse{Text: label + " " + status})
+
+	case "build":
+		// rest = "owner/repo:sha12"
+		colonIdx := strings.LastIndex(rest, ":")
+		if colonIdx < 0 {
+			return c.Respond(&tele.CallbackResponse{Text: "Invalid build data"})
+		}
+		repoFull := rest[:colonIdx]
+		sha12 := rest[colonIdx+1:]
+
+		pb := GetPending(repoFull, sha12)
+		if pb == nil {
+			return c.Respond(&tele.CallbackResponse{Text: "Session expired. Please /build again."})
+		}
+
+		// Collect selected features in order
+		var selectedFeatures []string
+		for _, f := range services.AvailableFeatures {
+			if pb.Features[f.Key] {
+				selectedFeatures = append(selectedFeatures, f.Key)
+			}
+		}
+
+		services.AddToQueueWithFeatures(pb.RepoID, pb.RepoFullName, pb.FullSHA, pb.ImageName, "local", selectedFeatures)
+		DeletePending(repoFull, sha12)
+
+		featDesc := "none"
+		if len(selectedFeatures) > 0 {
+			featDesc = strings.Join(selectedFeatures, ", ")
+		}
+		editText := fmt.Sprintf(
+			"🖥️ *Local Build Queued!*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`\n🛠️ Features: `%s`",
+			repoFull, sha12[:min(7, len(sha12))], featDesc,
+		)
+		_ = c.Edit(editText, tele.ModeMarkdown)
+
+		log.Printf("[Callbacks] Local build queued for %s @ %s features=%v", repoFull, sha12, selectedFeatures)
+		return c.Respond(&tele.CallbackResponse{Text: "✅ Build queued!"})
+	}
+
+	return c.Respond(&tele.CallbackResponse{Text: "Unknown feat action"})
+}
+
+// ── skip: ─────────────────────────────────────────────────────────────────────
 
 // handleSkipCallback — format: skip:owner/repo
 func handleSkipCallback(c tele.Context, data string) error {
@@ -174,7 +282,14 @@ func handleSkipCallback(c tele.Context, data string) error {
 	}
 
 	editText := fmt.Sprintf("⏭️ *Update Skipped*\n\n📦 Repository: `%s`", repoFullName)
-	_ = c.Edit(editText, tele.ModeMarkdownV2)
+	_ = c.Edit(editText, tele.ModeMarkdown)
 
 	return c.Respond(&tele.CallbackResponse{Text: "Update skipped"})
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
