@@ -136,7 +136,7 @@ func processJob(job *BuildJob) {
 
 // processLocalBuild — clone + docker build + push on this server.
 func processLocalBuild(job *BuildJob) {
-	log.Printf("[Queue] Local build for %s @ %s", job.RepoName, job.CommitSHA[:7])
+	log.Printf("[Queue] Local build for %s @ %s", job.RepoName, safe7(job.CommitSHA))
 
 	statsMu.Lock()
 	stats["queued"]--
@@ -229,7 +229,7 @@ func processLocalBuild(job *BuildJob) {
 
 // processActionsBuild — dispatch to GitHub Actions workflow.
 func processActionsBuild(job *BuildJob) {
-	log.Printf("[Queue] Dispatching GitHub Actions build for %s @ %s", job.RepoName, job.CommitSHA[:7])
+	log.Printf("[Queue] Dispatching GitHub Actions build for %s @ %s", job.RepoName, safe7(job.CommitSHA))
 
 	statsMu.Lock()
 	stats["queued"]--
@@ -338,6 +338,14 @@ func imageNameWithRegistry(imageName string) string {
 		owner = strings.Split(config.App.BuilderRepo, "/")[0]
 	}
 	return fmt.Sprintf("ghcr.io/%s/%s:latest", strings.ToLower(owner), slugifyImage(imageName))
+}
+
+// safe7 returns up to 7 chars of s (avoids panic when s is shorter).
+func safe7(s string) string {
+	if len(s) <= 7 {
+		return s
+	}
+	return s[:7]
 }
 
 func slugifyImage(s string) string {
