@@ -32,17 +32,12 @@ type SchedulerConfig struct {
 	DefaultIntervalMinutes int
 }
 
-type ServerConfig struct {
-	Port int
-}
-
 type Config struct {
 	Telegram    TelegramConfig
 	Docker      DockerConfig
 	GitHub      GitHubConfig
 	DB          DbConfig
 	Scheduler   SchedulerConfig
-	Server      ServerConfig
 	BuilderRepo string // owner/repo containing the GitHub Actions workflow
 }
 
@@ -57,13 +52,6 @@ func Load() *Config {
 	if v := os.Getenv("CHECK_INTERVAL_MINUTES"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
 			intervalMinutes = parsed
-		}
-	}
-
-	port := 3000
-	if v := os.Getenv("PORT"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil {
-			port = parsed
 		}
 	}
 
@@ -106,9 +94,6 @@ func Load() *Config {
 		},
 		Scheduler: SchedulerConfig{
 			DefaultIntervalMinutes: intervalMinutes,
-		},
-		Server: ServerConfig{
-			Port: port,
 		},
 		BuilderRepo: os.Getenv("BUILDER_REPO"),
 	}
