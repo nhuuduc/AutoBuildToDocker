@@ -12,6 +12,11 @@ import (
 	"github.com/nhd/autobuildtodocker/internal/config"
 )
 
+// isGHCR returns true when registry is ghcr.io.
+func isGHCR() bool {
+	return strings.HasPrefix(config.App.Docker.Registry, "ghcr.io")
+}
+
 // BuildRequest holds all info needed to build and push a Docker image.
 type BuildRequest struct {
 	RepoID         int64
@@ -38,13 +43,25 @@ func init() {
 	}
 }
 
-// getImageWithTag returns registry/image:tag string.
+// getImageWithTag returns the full image reference.
+// - docker.io  : imageName:tag  (e.g. myuser/myimage:latest)
+// - ghcr.io    : ghcr.io/owner/imageName:tag
+// - other      : registry/imageName:tag
 func getImageWithTag(imageName, tag string) string {
 	registry := config.App.Docker.Registry
-	if registry == "docker.io" {
+	switch {
+	case registry == "docker.io" || registry == "":
 		return imageName + ":" + tag
+	case strings.HasPrefix(registry, "ghcr.io"):
+		// owner comes from DOCKER_USERNAME (= GitHub username)
+		owner := config.App.Docker.Username
+		if owner == "" {
+			return "ghcr.io/" + imageName + ":" + tag
+		}
+		return fmt.Sprintf("ghcr.io/%s/%s:%s", strings.ToLower(owner), imageName, tag)
+	default:
+		return registry + "/" + imageName + ":" + tag
 	}
-	return registry + "/" + imageName + ":" + tag
 }
 
 // cloneRepo clones the repository at a specific commit SHA.
@@ -96,22 +113,41 @@ func buildImage(contextDir, imageName, dockerfilePath string) error {
 	return nil
 }
 
-// pushImage logs into registry if credentials exist, then pushes.
+// pushImage logs into registry then pushes the image.
+// For ghcr.io: uses GITHUB_TOKEN as password (DOCKER_PASSWORD can override).
 func pushImage(imageName string) (string, error) {
 	fullImage := getImageWithTag(imageName, "latest")
 	log.Printf("[Docker] Pushing image: %s", fullImage)
 
 	cfg := config.App.Docker
-	if cfg.Username != "" && cfg.Password != "" {
-		registry := cfg.Registry
-		if registry == "docker.io" {
-			registry = "https://index.docker.io/v1/"
+
+	// Determine registry endpoint, username and password for login.
+	var loginRegistry, loginUser, loginPass string
+
+	if isGHCR() {
+		loginRegistry = "ghcr.io"
+		loginUser = cfg.Username // GitHub username
+		loginPass = cfg.Password // DOCKER_PASSWORD overrides; fall back to GITHUB_TOKEN
+		if loginPass == "" {
+			loginPass = config.App.GitHub.Token
 		}
-		loginCmd := exec.Command("docker", "login", registry, "-u", cfg.Username, "--password-stdin")
-		loginCmd.Stdin = strings.NewReader(cfg.Password)
+	} else {
+		loginRegistry = cfg.Registry
+		if loginRegistry == "docker.io" || loginRegistry == "" {
+			loginRegistry = "https://index.docker.io/v1/"
+		}
+		loginUser = cfg.Username
+		loginPass = cfg.Password
+	}
+
+	if loginUser != "" && loginPass != "" {
+		loginCmd := exec.Command("docker", "login", loginRegistry, "-u", loginUser, "--password-stdin")
+		loginCmd.Stdin = strings.NewReader(loginPass)
 		if out, err := loginCmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("docker login failed: %w\n%s", err, out)
 		}
+	} else {
+		log.Println("[Docker] No credentials provided, attempting anonymous push")
 	}
 
 	pushCmd := exec.Command("docker", "push", fullImage)

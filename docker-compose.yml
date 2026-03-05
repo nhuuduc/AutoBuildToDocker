@@ -7,9 +7,11 @@ services:
     environment:
       - NODE_ENV=production
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - DOCKER_REGISTRY=${DOCKER_REGISTRY:-docker.io}
+      # GitHub Container Registry — images stored at ghcr.io/<DOCKER_USERNAME>/<image>
+      - DOCKER_REGISTRY=${DOCKER_REGISTRY:-ghcr.io}
       - DOCKER_USERNAME=${DOCKER_USERNAME}
-      - DOCKER_PASSWORD=${DOCKER_PASSWORD}
+      # Leave DOCKER_PASSWORD unset to use GITHUB_TOKEN automatically for ghcr.io
+      - DOCKER_PASSWORD=${DOCKER_PASSWORD:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - DB_PATH=/app/data/app.db
       - WORK_DIR=/builds
@@ -23,7 +25,7 @@ services:
     ports:
       - "3000:3000"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      test: [ "CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
