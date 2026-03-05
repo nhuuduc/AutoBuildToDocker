@@ -1,0 +1,297 @@
+package handlers
+
+import (
+	"fmt"
+	"log"
+	"regexp"
+	"strings"
+
+	"github.com/nhd/autobuildtodocker/internal/db"
+	"github.com/nhd/autobuildtodocker/internal/services"
+	tele "gopkg.in/telebot.v3"
+)
+
+// RegisterCommands registers all slash commands on the bot.
+func RegisterCommands(bot *tele.Bot) {
+	bot.Handle("/start", handleStart)
+	bot.Handle("/add", handleAdd)
+	bot.Handle("/list", handleList)
+	bot.Handle("/remove", handleRemove)
+	bot.Handle("/build", handleBuild)
+	bot.Handle("/builds", handleBuilds)
+	bot.Handle("/status", handleStatus)
+	bot.Handle("/settings", handleSettings)
+	bot.Handle("/help", handleStart) // alias
+}
+
+// ─── /start ──────────────────────────────────────────────────────────────────
+
+func handleStart(c tele.Context) error {
+	user := c.Sender()
+	if user != nil {
+		_ = db.UpsertUser(user.ID, user.Username, user.FirstName)
+	}
+	return c.Send(
+		"👋 *Welcome to Docker Build Bot\\!*\n\n"+
+			"I'll monitor your GitHub repositories and build Docker images automatically\\.\n\n"+
+			"*Commands:*\n"+
+			"`/add <owner/repo>` — Add a repository\n"+
+			"`/list` — List your repositories\n"+
+			"`/remove <owner/repo>` — Remove a repository\n"+
+			"`/build <owner/repo>` — Trigger a manual build\n"+
+			"`/builds [owner/repo]` — Show build history\n"+
+			"`/status` — Show queue status\n"+
+			"`/settings` — Bot settings\n"+
+			"`/help` — Show this message",
+		tele.ModeMarkdownV2,
+	)
+}
+
+// ─── /add ────────────────────────────────────────────────────────────────────
+
+var reGitHubURL = regexp.MustCompile(`(?:https?://github\.com/)?([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+?)(?:\.git)?(?:@([a-zA-Z0-9_./%-]+))?$`)
+
+func parseGitHubArg(arg string) (owner, repo, branch string, ok bool) {
+	m := reGitHubURL.FindStringSubmatch(strings.TrimSpace(arg))
+	if m == nil {
+		return
+	}
+	return m[1], m[2], m[3], true
+}
+
+func slugify(s string) string {
+	return regexp.MustCompile(`[^a-z0-9-]`).ReplaceAllString(strings.ToLower(s), "-")
+}
+
+func handleAdd(c tele.Context) error {
+	user := c.Sender()
+	if user == nil {
+		return c.Send("Unable to get user information.")
+	}
+	_ = db.UpsertUser(user.ID, user.Username, user.FirstName)
+
+	args := strings.TrimSpace(c.Message().Payload)
+	if args == "" {
+		return c.Send("Usage: `/add <owner/repo> [image\\-name]`", tele.ModeMarkdownV2)
+	}
+
+	if !services.IsGitHubConfigured() {
+		return c.Send("⚠️ GitHub API is not configured. Please set GITHUB_TOKEN.")
+	}
+
+	parts := strings.Fields(args)
+	owner, repo, branch, ok := parseGitHubArg(parts[0])
+	if !ok {
+		return c.Send("❌ Invalid GitHub repository format. Use `owner/repo` or GitHub URL.", tele.ModeMarkdownV2)
+	}
+
+	_ = c.Send("🔍 Validating repository on GitHub...")
+
+	ghRepo, err := services.ValidateRepo(owner, repo)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return c.Send(fmt.Sprintf("❌ Repository not found: `%s/%s`", owner, repo), tele.ModeMarkdownV2)
+		}
+		return c.Send("❌ Error: " + err.Error())
+	}
+
+	if branch == "" {
+		branch = ghRepo.DefaultBranch
+	}
+
+	// Determine image name
+	imageName := slugify(repo)
+	if len(parts) >= 2 {
+		imageName = slugify(parts[1])
+	}
+
+	// Get DB user
+	dbUser, _ := db.FindUserByTelegramID(user.ID)
+	if dbUser == nil {
+		return c.Send("❌ User not found. Please /start first.")
+	}
+
+	// Check existing
+	existing, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	if existing != nil {
+		return c.Send(fmt.Sprintf("ℹ️ Repository `%s/%s` is already tracked\\.\nBranch: `%s` | Image: `%s`",
+			owner, repo, existing.Branch, existing.ImageName), tele.ModeMarkdownV2)
+	}
+
+	_, err = db.CreateRepo(dbUser.ID, owner, repo, branch, "Dockerfile", imageName, "docker.io", 60)
+	if err != nil {
+		return c.Send("❌ Failed to save repository: " + err.Error())
+	}
+
+	log.Printf("Repository added: %s/%s by @%s", owner, repo, user.Username)
+	return c.Send(fmt.Sprintf(
+		"✅ *Repository added\\!*\n\n"+
+			"📦 `%s/%s`\n"+
+			"🌿 Branch: `%s`\n"+
+			"🐳 Image: `%s`",
+		owner, repo, branch, imageName,
+	), tele.ModeMarkdownV2)
+}
+
+// ─── /list ───────────────────────────────────────────────────────────────────
+
+func handleList(c tele.Context) error {
+	dbUser, _ := db.FindUserByTelegramID(c.Sender().ID)
+	if dbUser == nil {
+		return c.Send("Please run /start first.")
+	}
+
+	repos, err := db.FindReposByUser(dbUser.ID)
+	if err != nil || len(repos) == 0 {
+		return c.Send("📭 No repositories tracked yet. Use `/add <owner/repo>`.", tele.ModeMarkdownV2)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📦 *Your Repositories:*\n\n")
+	for i, r := range repos {
+		status := "✅ Active"
+		if !r.IsActive {
+			status = "⏸️ Paused"
+		}
+		sb.WriteString(fmt.Sprintf("%d\\. `%s/%s`\n   Branch: `%s` | Image: `%s` | %s\n\n",
+			i+1, r.Owner, r.Repo, r.Branch, r.ImageName, status))
+	}
+	return c.Send(sb.String(), tele.ModeMarkdownV2)
+}
+
+// ─── /remove ─────────────────────────────────────────────────────────────────
+
+func handleRemove(c tele.Context) error {
+	dbUser, _ := db.FindUserByTelegramID(c.Sender().ID)
+	if dbUser == nil {
+		return c.Send("Please run /start first.")
+	}
+	args := strings.TrimSpace(c.Message().Payload)
+	if args == "" {
+		return c.Send("Usage: `/remove <owner/repo>`", tele.ModeMarkdownV2)
+	}
+	owner, repo, _, ok := parseGitHubArg(args)
+	if !ok {
+		return c.Send("❌ Invalid format. Use `owner/repo`", tele.ModeMarkdownV2)
+	}
+
+	r, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	if r == nil {
+		return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not found.", owner, repo), tele.ModeMarkdownV2)
+	}
+
+	if err := db.DeleteRepo(r.ID); err != nil {
+		return c.Send("❌ Failed to remove: " + err.Error())
+	}
+	return c.Send(fmt.Sprintf("✅ Removed `%s/%s`", owner, repo), tele.ModeMarkdownV2)
+}
+
+// ─── /build ──────────────────────────────────────────────────────────────────
+
+func handleBuild(c tele.Context) error {
+	dbUser, _ := db.FindUserByTelegramID(c.Sender().ID)
+	if dbUser == nil {
+		return c.Send("Please run /start first.")
+	}
+	args := strings.TrimSpace(c.Message().Payload)
+	if args == "" {
+		return c.Send("Usage: `/build <owner/repo>`", tele.ModeMarkdownV2)
+	}
+	owner, repo, _, ok := parseGitHubArg(args)
+	if !ok {
+		return c.Send("❌ Invalid format.", tele.ModeMarkdownV2)
+	}
+
+	r, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	if r == nil {
+		return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not tracked.", owner, repo), tele.ModeMarkdownV2)
+	}
+
+	commitSHA, err := services.GetLatestCommit(owner, repo, r.Branch)
+	if err != nil {
+		return c.Send("❌ Could not get latest commit: " + err.Error())
+	}
+
+	services.AddToQueue(r.ID, fmt.Sprintf("%s/%s", owner, repo), commitSHA, r.ImageName)
+	return c.Send(fmt.Sprintf("✅ *Build queued\\!*\n\n📦 `%s/%s`\n🔗 Commit: `%s`",
+		owner, repo, commitSHA[:7]), tele.ModeMarkdownV2)
+}
+
+// ─── /builds ─────────────────────────────────────────────────────────────────
+
+func handleBuilds(c tele.Context) error {
+	dbUser, _ := db.FindUserByTelegramID(c.Sender().ID)
+	if dbUser == nil {
+		return c.Send("Please run /start first.")
+	}
+
+	args := strings.TrimSpace(c.Message().Payload)
+	var builds []db.Build
+
+	if args != "" {
+		owner, repo, _, ok := parseGitHubArg(args)
+		if !ok {
+			return c.Send("❌ Invalid format.", tele.ModeMarkdownV2)
+		}
+		r, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+		if r == nil {
+			return c.Send(fmt.Sprintf("❌ Repository `%s/%s` not tracked.", owner, repo), tele.ModeMarkdownV2)
+		}
+		builds, _ = db.FindBuildsByRepo(r.ID, 10)
+	} else {
+		builds, _ = db.FindAllBuildsRecent(10)
+	}
+
+	if len(builds) == 0 {
+		return c.Send("📭 No builds yet.")
+	}
+
+	statusEmoji := map[string]string{
+		"pending":  "⏳",
+		"building": "⚙️",
+		"success":  "✅",
+		"failed":   "❌",
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🏗️ *Recent Builds:*\n\n")
+	for i, b := range builds {
+		sha := "unknown"
+		if b.CommitSHA.Valid {
+			sha = b.CommitSHA.String[:7]
+		}
+		emoji := statusEmoji[b.BuildStatus]
+		sb.WriteString(fmt.Sprintf("%d\\. %s `%s` — `%s`\n   %s\n\n",
+			i+1, emoji, sha, b.BuildStatus, b.StartedAt))
+	}
+	return c.Send(sb.String(), tele.ModeMarkdownV2)
+}
+
+// ─── /status ─────────────────────────────────────────────────────────────────
+
+func handleStatus(c tele.Context) error {
+	stats := services.GetQueueStats()
+	return c.Send(fmt.Sprintf(
+		"📊 *Queue Status*\n\n"+
+			"Total: %d\n"+
+			"⏳ Queued: %d\n"+
+			"⚙️ Running: %d\n"+
+			"✅ Completed: %d\n"+
+			"❌ Failed: %d",
+		stats["total"], stats["queued"], stats["running"], stats["completed"], stats["failed"],
+	), tele.ModeMarkdownV2)
+}
+
+// ─── /settings ───────────────────────────────────────────────────────────────
+
+func handleSettings(c tele.Context) error {
+	dbUser, _ := db.FindUserByTelegramID(c.Sender().ID)
+	if dbUser == nil {
+		return c.Send("Please run /start first.")
+	}
+	repos, _ := db.FindReposByUser(dbUser.ID)
+	return c.Send(fmt.Sprintf(
+		"⚙️ *Settings*\n\nYou have %d repositor%s tracked\\.",
+		len(repos), map[bool]string{true: "y", false: "ies"}[len(repos) == 1],
+	), tele.ModeMarkdownV2)
+}

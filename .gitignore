@@ -1,0 +1,51 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# ── Go build artifacts ─────────────────────────────────────────────────────
+# Compiled binary (any name at root)
+/bot-go
+/cicd-bot
+
+# Go temp / local GOPATH overrides
+.gopath/
+.go-tmp/
+temp/
+
+# ── Node.js (legacy) ───────────────────────────────────────────────────────
+/node_modules
+dist/
+/build
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+*.tsbuildinfo
+
+# ── Environment ────────────────────────────────────────────────────────────
+.env*
+!.env.example
+
+# ── Database / data ────────────────────────────────────────────────────────
+/data
+*.db
+*.db-wal
+*.db-shm
+
+# ── Misc ───────────────────────────────────────────────────────────────────
+.DS_Store
+*.pem
+repomix-output.xml
+logs.txt
+__pycache__
+
+# ── Agent / tooling ────────────────────────────────────────────────────────
+.claude/agent-memory/
+.claude/hooks/.logs/
+.claude/settings.bak.json
+.gemini/settings.json
+.serena/cache
+.opencode/
+plans/**/*
+!plans/templates/*
+external/
+worktrees/
+prompt.md
+ck.md

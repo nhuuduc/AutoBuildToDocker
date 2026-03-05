@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: cicd-telegram-bot
+    environment:
+      - NODE_ENV=production
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - DOCKER_REGISTRY=${DOCKER_REGISTRY:-docker.io}
+      - DOCKER_USERNAME=${DOCKER_USERNAME}
+      - DOCKER_PASSWORD=${DOCKER_PASSWORD}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - DB_PATH=/app/data/app.db
+      - WORK_DIR=/builds
+      - CHECK_INTERVAL_MINUTES=${CHECK_INTERVAL_MINUTES:-60}
+      - PORT=3000
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./builds:/builds
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  default:
+    name: cicd-network

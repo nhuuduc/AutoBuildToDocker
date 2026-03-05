@@ -1,0 +1,209 @@
+package services
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/nhd/autobuildtodocker/internal/config"
+)
+
+// BuildRequest holds all info needed to build and push a Docker image.
+type BuildRequest struct {
+	RepoID         int64
+	RepoFullName   string
+	CommitSHA      string
+	ImageName      string
+	DockerfilePath string
+	Branch         string
+}
+
+// BuildResult is the outcome of a build.
+type BuildResult struct {
+	Success   bool
+	ImageName string
+	Logs      string
+	Error     string
+}
+
+var tempDir = filepath.Join(".", "temp", "builds")
+
+func init() {
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		log.Printf("[Docker] Warning: could not create tempDir %s: %v", tempDir, err)
+	}
+}
+
+// getImageWithTag returns registry/image:tag string.
+func getImageWithTag(imageName, tag string) string {
+	registry := config.App.Docker.Registry
+	if registry == "docker.io" {
+		return imageName + ":" + tag
+	}
+	return registry + "/" + imageName + ":" + tag
+}
+
+// cloneRepo clones the repository at a specific commit SHA.
+func cloneRepo(repoFullName, commitSHA string) (string, error) {
+	cloneDir := filepath.Join(tempDir, strings.ReplaceAll(repoFullName, "/", "_"))
+	gitURL := "https://github.com/" + repoFullName + ".git"
+
+	log.Printf("[Docker] Cloning %s at %s", repoFullName, commitSHA[:7])
+
+	// Clean up existing directory
+	_ = os.RemoveAll(cloneDir)
+
+	// Clone shallow then fetch specific commit
+	cmds := [][]string{
+		{"git", "clone", "--depth", "1", gitURL, cloneDir},
+		{"git", "-C", cloneDir, "fetch", "--depth", "1", "origin", commitSHA},
+		{"git", "-C", cloneDir, "checkout", commitSHA},
+	}
+
+	var allOutput strings.Builder
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		allOutput.Write(out)
+		if err != nil {
+			return "", fmt.Errorf("git command failed (%v): %w\n%s", args, err, out)
+		}
+	}
+	log.Printf("[Docker] Successfully cloned %s", repoFullName)
+	return cloneDir, nil
+}
+
+// buildImage builds a Docker image.
+func buildImage(contextDir, imageName, dockerfilePath string) error {
+	fullImage := getImageWithTag(imageName, "latest")
+	dockerfile := filepath.Join(contextDir, dockerfilePath)
+
+	if _, err := os.Stat(dockerfile); os.IsNotExist(err) {
+		return fmt.Errorf("Dockerfile not found at %s", dockerfile)
+	}
+
+	log.Printf("[Docker] Building image: %s", fullImage)
+	cmd := exec.Command("docker", "build", "-t", fullImage, "-f", dockerfile, contextDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker build failed: %w\n%s", err, out)
+	}
+	log.Printf("[Docker] Successfully built: %s", fullImage)
+	return nil
+}
+
+// pushImage logs into registry if credentials exist, then pushes.
+func pushImage(imageName string) (string, error) {
+	fullImage := getImageWithTag(imageName, "latest")
+	log.Printf("[Docker] Pushing image: %s", fullImage)
+
+	cfg := config.App.Docker
+	if cfg.Username != "" && cfg.Password != "" {
+		registry := cfg.Registry
+		if registry == "docker.io" {
+			registry = "https://index.docker.io/v1/"
+		}
+		loginCmd := exec.Command("docker", "login", registry, "-u", cfg.Username, "--password-stdin")
+		loginCmd.Stdin = strings.NewReader(cfg.Password)
+		if out, err := loginCmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("docker login failed: %w\n%s", err, out)
+		}
+	}
+
+	pushCmd := exec.Command("docker", "push", fullImage)
+	out, err := pushCmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker push failed: %w\n%s", err, out)
+	}
+	log.Printf("[Docker] Successfully pushed: %s", fullImage)
+	return fullImage, nil
+}
+
+// cleanup removes the temporary clone directory.
+func cleanup(repoFullName string) {
+	cloneDir := filepath.Join(tempDir, strings.ReplaceAll(repoFullName, "/", "_"))
+	if err := os.RemoveAll(cloneDir); err != nil {
+		log.Printf("[Docker] Cleanup failed for %s: %v", cloneDir, err)
+	} else {
+		log.Printf("[Docker] Cleaned up: %s", cloneDir)
+	}
+}
+
+// BuildAndPush executes the full clone → build → push workflow.
+func BuildAndPush(req BuildRequest) BuildResult {
+	var logs []string
+	start := time.Now()
+	ts := func() string { return time.Now().Format(time.RFC3339) }
+
+	appendLog := func(msg string) {
+		log.Println(msg)
+		logs = append(logs, fmt.Sprintf("[%s] %s", ts(), msg))
+	}
+
+	appendLog(fmt.Sprintf("Starting build for %s", req.RepoFullName))
+	appendLog(fmt.Sprintf("Commit: %s", req.CommitSHA[:7]))
+	appendLog(fmt.Sprintf("Image: %s", req.ImageName))
+
+	dockerfilePath := req.DockerfilePath
+	if dockerfilePath == "" {
+		dockerfilePath = "Dockerfile"
+	}
+
+	// Step 1: Clone
+	appendLog("Cloning repository...")
+	cloneDir, err := cloneRepo(req.RepoFullName, req.CommitSHA)
+	if err != nil {
+		appendLog("Clone failed: " + err.Error())
+		cleanup(req.RepoFullName)
+		return BuildResult{
+			Success:   false,
+			ImageName: req.ImageName,
+			Logs:      strings.Join(logs, "\n"),
+			Error:     err.Error(),
+		}
+	}
+	appendLog("Repository cloned successfully")
+
+	// Step 2: Build
+	appendLog("Building Docker image...")
+	if err := buildImage(cloneDir, req.ImageName, dockerfilePath); err != nil {
+		appendLog("Build failed: " + err.Error())
+		cleanup(req.RepoFullName)
+		return BuildResult{
+			Success:   false,
+			ImageName: req.ImageName,
+			Logs:      strings.Join(logs, "\n"),
+			Error:     err.Error(),
+		}
+	}
+	appendLog("Image built successfully")
+
+	// Step 3: Push
+	appendLog("Pushing to registry...")
+	pushedImage, err := pushImage(req.ImageName)
+	if err != nil {
+		appendLog("Push failed: " + err.Error())
+		cleanup(req.RepoFullName)
+		return BuildResult{
+			Success:   false,
+			ImageName: req.ImageName,
+			Logs:      strings.Join(logs, "\n"),
+			Error:     err.Error(),
+		}
+	}
+	appendLog("Image pushed successfully: " + pushedImage)
+
+	cleanup(req.RepoFullName)
+	duration := time.Since(start).Seconds()
+	appendLog(fmt.Sprintf("Build completed in %.1fs", duration))
+
+	return BuildResult{
+		Success:   true,
+		ImageName: pushedImage,
+		Logs:      strings.Join(logs, "\n"),
+	}
+}
