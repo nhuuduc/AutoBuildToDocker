@@ -21,6 +21,7 @@ type BuildJob struct {
 	ChatID       int64 // Telegram user to notify
 	BuildID      int64 // DB row ID
 	DispatchedAt time.Time
+	BuildMode    string // "local" or "actions"
 }
 
 // ─── Queue ───────────────────────────────────────────────────────────────────
@@ -42,7 +43,7 @@ var (
 func StartQueue() {
 	queueOnce.Do(func() {
 		go queueWorker()
-		log.Println("Build queue worker started (GitHub Actions dispatch mode)")
+		log.Println("Build queue worker started (local + GitHub Actions modes)")
 	})
 }
 
@@ -59,7 +60,11 @@ func GetQueueStats() map[string]int {
 }
 
 // AddToQueue enqueues a new build job.
-func AddToQueue(repoID int64, repoName, commitSHA, imageName string) {
+// buildMode: "local" = build on this server, "actions" = dispatch to GitHub Actions.
+func AddToQueue(repoID int64, repoName, commitSHA, imageName, buildMode string) {
+	if buildMode == "" {
+		buildMode = "actions"
+	}
 	// Get user Telegram ID from DB
 	repo, err := db.FindRepoByID(repoID)
 	if err != nil || repo == nil {
@@ -85,21 +90,26 @@ func AddToQueue(repoID int64, repoName, commitSHA, imageName string) {
 		ImageName: imageName,
 		ChatID:    user.TelegramID,
 		BuildID:   buildID,
+		BuildMode: buildMode,
 	}
 
 	statsMu.Lock()
 	stats["queued"]++
 	statsMu.Unlock()
 
+	modeLabel := "GitHub Actions"
+	if buildMode == "local" {
+		modeLabel = "Local Server"
+	}
 	_ = SendBuildStatus(user.TelegramID, BuildStatus{
 		Repo:      repoName,
 		Status:    "pending",
 		ImageName: imageNameWithRegistry(imageName),
-		Message:   "Dispatching to GitHub Actions...",
+		Message:   fmt.Sprintf("Queued for %s build...", modeLabel),
 	})
 
 	jobQueue <- job
-	log.Printf("[Queue] Job enqueued: %s @ %s", repoName, commitSHA[:7])
+	log.Printf("[Queue] Job enqueued [%s]: %s @ %s", buildMode, repoName, commitSHA[:7])
 }
 
 // ─── Worker ──────────────────────────────────────────────────────────────────
@@ -111,6 +121,73 @@ func queueWorker() {
 }
 
 func processJob(job *BuildJob) {
+	if job.BuildMode == "local" {
+		processLocalBuild(job)
+	} else {
+		processActionsBuild(job)
+	}
+}
+
+// processLocalBuild — clone + docker build + push on this server.
+func processLocalBuild(job *BuildJob) {
+	log.Printf("[Queue] Local build for %s @ %s", job.RepoName, job.CommitSHA[:7])
+
+	statsMu.Lock()
+	stats["queued"]--
+	stats["dispatched"]++
+	statsMu.Unlock()
+
+	_ = db.UpdateBuildStatus(job.BuildID, "building", "")
+	_ = SendBuildStatus(job.ChatID, BuildStatus{
+		Repo:    job.RepoName,
+		Status:  "running",
+		Message: "🖥️ Building locally on server...",
+	})
+
+	repo, _ := db.FindRepoByID(job.RepoID)
+	dockerfilePath := "Dockerfile"
+	if repo != nil && repo.DockerfilePath != "" {
+		dockerfilePath = repo.DockerfilePath
+	}
+
+	result := BuildAndPush(BuildRequest{
+		RepoID:         job.RepoID,
+		RepoFullName:   job.RepoName,
+		CommitSHA:      job.CommitSHA,
+		ImageName:      job.ImageName,
+		DockerfilePath: dockerfilePath,
+	})
+
+	statsMu.Lock()
+	stats["dispatched"]--
+	statsMu.Unlock()
+
+	if result.Success {
+		_ = db.UpdateBuildStatus(job.BuildID, "success", "")
+		statsMu.Lock()
+		stats["completed"]++
+		statsMu.Unlock()
+		_ = SendBuildStatus(job.ChatID, BuildStatus{
+			Repo:      job.RepoName,
+			Status:    "success",
+			ImageName: result.ImageName,
+			Message:   "✅ Local build & push completed!",
+		})
+	} else {
+		_ = db.UpdateBuildStatus(job.BuildID, "failed", result.Error)
+		statsMu.Lock()
+		stats["failed"]++
+		statsMu.Unlock()
+		_ = SendBuildStatus(job.ChatID, BuildStatus{
+			Repo:    job.RepoName,
+			Status:  "failed",
+			Message: "❌ Local build failed: " + result.Error,
+		})
+	}
+}
+
+// processActionsBuild — dispatch to GitHub Actions workflow.
+func processActionsBuild(job *BuildJob) {
 	log.Printf("[Queue] Dispatching GitHub Actions build for %s @ %s", job.RepoName, job.CommitSHA[:7])
 
 	statsMu.Lock()
@@ -137,7 +214,6 @@ func processJob(job *BuildJob) {
 		return
 	}
 
-	// Derive image name slug (lowercase, no special chars)
 	imageName := slugifyImage(job.ImageName)
 
 	dispatchedAt := time.Now().UTC()
@@ -162,10 +238,9 @@ func processJob(job *BuildJob) {
 		return
 	}
 
-	log.Printf("[Queue] ✅ Dispatched workflow for %s — GitHub Actions will notify Telegram when done", job.RepoName)
+	log.Printf("[Queue] ✅ Dispatched workflow for %s", job.RepoName)
 	_ = db.UpdateBuildStatus(job.BuildID, "dispatched", "")
 
-	// Send "dispatched" Telegram notification
 	imageRef := fmt.Sprintf("ghcr.io/%s/%s:latest", strings.Split(builderRepo, "/")[0], imageName)
 	_ = SendBuildStatus(job.ChatID, BuildStatus{
 		Repo:      job.RepoName,
@@ -174,7 +249,6 @@ func processJob(job *BuildJob) {
 		Message:   fmt.Sprintf("GitHub Actions started\\! [View run](https://github.com/%s/actions)", builderRepo),
 	})
 
-	// Poll in background to mark build completed in DB
 	go pollWorkflowResult(job, builderRepo, dispatchedAt)
 }
 

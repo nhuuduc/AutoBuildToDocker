@@ -241,9 +241,27 @@ func handleBuild(c tele.Context) error {
 		return c.Send("❌ Could not get latest commit: " + err.Error())
 	}
 
-	services.AddToQueue(r.ID, fmt.Sprintf("%s/%s", owner, repo), commitSHA, r.ImageName)
-	return c.Send(fmt.Sprintf("✅ *Build queued!*\n\n📦 `%s/%s`\n🔗 Commit: `%s`",
-		owner, repo, commitSHA[:7]), tele.ModeMarkdown)
+	repoFull := fmt.Sprintf("%s/%s", owner, repo)
+
+	// Inline keyboard: choose build mode
+	btnLocal := tele.InlineButton{
+		Text:   "🖥️ Local Server",
+		Unique: "mode_local",
+		Data:   fmt.Sprintf("mode:local:%s:%s", repoFull, commitSHA),
+	}
+	btnActions := tele.InlineButton{
+		Text:   "🚀 GitHub Actions",
+		Unique: "mode_actions",
+		Data:   fmt.Sprintf("mode:actions:%s:%s", repoFull, commitSHA),
+	}
+
+	kb := &tele.ReplyMarkup{}
+	kb.InlineKeyboard = [][]tele.InlineButton{{btnLocal, btnActions}}
+
+	return c.Send(
+		fmt.Sprintf("🐳 *Build:* `%s`\n🔗 Commit: `%s`\n\nChọn nơi build:", repoFull, commitSHA[:7]),
+		tele.ModeMarkdown, kb,
+	)
 }
 
 // ─── /builds ─────────────────────────────────────────────────────────────────

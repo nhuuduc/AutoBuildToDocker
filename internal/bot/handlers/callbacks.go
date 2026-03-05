@@ -31,6 +31,8 @@ func handleCallback(c tele.Context) error {
 		return handleBuildCallback(c, data)
 	case strings.HasPrefix(data, "skip:"):
 		return handleSkipCallback(c, data)
+	case strings.HasPrefix(data, "mode:"):
+		return handleModeCallback(c, data)
 	default:
 		return c.Respond(&tele.CallbackResponse{Text: "Unknown action"})
 	}
@@ -65,15 +67,68 @@ func handleBuildCallback(c tele.Context, data string) error {
 		return c.Respond(&tele.CallbackResponse{Text: "Repository not found"})
 	}
 
-	services.AddToQueue(repoData.ID, repoFullName, commitSHA, repoData.ImageName)
+	services.AddToQueue(repoData.ID, repoFullName, commitSHA, repoData.ImageName, "actions")
 	_ = db.DeleteConfirmationsByRepo(repoData.ID)
 
-	// Edit original message
 	editText := fmt.Sprintf("✅ *Build Queued*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`",
 		repoFullName, commitSHA[:7])
 	_ = c.Edit(editText, tele.ModeMarkdownV2)
 
 	return c.Respond(&tele.CallbackResponse{Text: "Build queued!"})
+}
+
+// handleModeCallback — format: mode:local:owner/repo:commitSHA
+//
+//	stores build mode choice and queues the job.
+func handleModeCallback(c tele.Context, data string) error {
+	// data = "mode:local:owner/repo:commitSHA" or "mode:actions:owner/repo:..."
+	parts := strings.SplitN(data, ":", 4)
+	if len(parts) < 4 {
+		return c.Respond(&tele.CallbackResponse{Text: "Invalid mode request"})
+	}
+	buildMode := parts[1]    // "local" or "actions"
+	repoFullName := parts[2] // "owner/repo"
+	commitSHA := parts[3]
+
+	split := strings.SplitN(repoFullName, "/", 2)
+	if len(split) < 2 {
+		return c.Respond(&tele.CallbackResponse{Text: "Invalid repo format"})
+	}
+	owner, repo := split[0], split[1]
+
+	sender := c.Sender()
+	if sender == nil {
+		return c.Respond(&tele.CallbackResponse{Text: "Cannot identify user"})
+	}
+
+	dbUser, _ := db.FindUserByTelegramID(sender.ID)
+	if dbUser == nil {
+		return c.Respond(&tele.CallbackResponse{Text: "User not found. Please /start first."})
+	}
+
+	repoData, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	if repoData == nil {
+		return c.Respond(&tele.CallbackResponse{Text: "Repository not found"})
+	}
+
+	services.AddToQueue(repoData.ID, repoFullName, commitSHA, repoData.ImageName, buildMode)
+
+	modeLabel := "🚀 GitHub Actions"
+	if buildMode == "local" {
+		modeLabel = "🖥️ Local Server"
+	}
+
+	shortSHA := commitSHA
+	if len(commitSHA) > 7 {
+		shortSHA = commitSHA[:7]
+	}
+
+	editText := fmt.Sprintf("✅ *Build Queued* \u00b7 %s\n\n📦 Repository: `%s`\n🔗 Commit: `%s`",
+		modeLabel, repoFullName, shortSHA)
+	_ = c.Edit(editText, tele.ModeMarkdown)
+
+	log.Printf("[Callbacks] Mode selected: %s for %s @ %s by user %d", buildMode, repoFullName, shortSHA, sender.ID)
+	return c.Respond(&tele.CallbackResponse{Text: "✅ Build queued!"})
 }
 
 // handleSkipCallback — format: skip:owner/repo
