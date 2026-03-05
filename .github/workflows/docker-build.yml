@@ -20,9 +20,9 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  # ── Build each platform in parallel (no QEMU bottleneck) ──────────────────
+  # ── Build each platform in parallel — NO QEMU (Go cross-compile) ──────────
   build:
-    name: Build (${{ matrix.platform }})
+    name: Build (${{ matrix.slug }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -30,9 +30,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
+        include:
+          - platform: linux/amd64
+            slug: linux-amd64
+          - platform: linux/arm64
+            slug: linux-arm64
 
     steps:
       - name: Checkout source repo
@@ -41,9 +43,6 @@ jobs:
           repository: ${{ inputs.repo }}
           ref: ${{ inputs.commit_sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -55,20 +54,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Prepare platform tag slug
-        id: slug
-        run: echo "slug=$(echo '${{ matrix.platform }}' | tr '/' '-')" >> $GITHUB_OUTPUT
-
       - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}:${{ steps.slug.outputs.slug }}-${{ inputs.commit_sha }}
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}:${{ matrix.slug }}-${{ inputs.commit_sha }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.slug }}-${{ inputs.repo }}
+          cache-to: type=gha,scope=${{ matrix.slug }}-${{ inputs.repo }},mode=max
 
   # ── Merge into multi-arch manifest + notify ────────────────────────────────
   merge:
@@ -87,26 +83,22 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create and push multi-arch manifest
+        env:
+          SHA: ${{ inputs.commit_sha }}
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}"
-          SHA="${{ inputs.commit_sha }}"
-          # Multi-arch manifest (amd64 + arm64)
           docker buildx imagetools create \
             --tag "${IMAGE}:latest" \
             --tag "${IMAGE}:${SHA}" \
             "${IMAGE}:linux-amd64-${SHA}" \
             "${IMAGE}:linux-arm64-${SHA}"
-          # Explicit x86-only tag
-          docker buildx imagetools create \
-            --tag "${IMAGE}:amd64" \
-            "${IMAGE}:linux-amd64-${SHA}"
-          echo "✅ Images pushed:"
-          echo "   ${IMAGE}:latest  (amd64 + arm64)"
-          echo "   ${IMAGE}:amd64   (x86 only)"
+          echo "✅ Multi-arch manifest pushed: ${IMAGE}:latest"
 
       - name: Notify Telegram — Success
+        env:
+          SHA: ${{ inputs.commit_sha }}
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "{
@@ -114,16 +106,17 @@ jobs:
               \"text\": \"✅ *Build Successful!*\n\n📦 *Repo:* \`${{ inputs.repo }}\`\n🔗 *Commit:* \`${SHA:0:7}\`\n🐳 *Image:* \`${IMAGE}:latest\`\n🖥️ Platforms: linux/amd64, linux/arm64\n🔗 [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
               \"parse_mode\": \"Markdown\"
             }"
-        env:
-          SHA: ${{ inputs.commit_sha }}
 
       - name: Notify Telegram — Failure
         if: failure()
+        env:
+          SHA: ${{ inputs.commit_sha }}
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}
         run: |
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "{
               \"chat_id\": \"${{ inputs.telegram_chat_id }}\",
-              \"text\": \"❌ *Build Failed*\n\n📦 *Repo:* \`${{ inputs.repo }}\`\n🔗 *Commit:* \`${{ inputs.commit_sha }}\`\n🔗 [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
+              \"text\": \"❌ *Build Failed*\n\n📦 *Repo:* \`${{ inputs.repo }}\`\n🔗 *Commit:* \`${SHA:0:7}\`\n🔗 [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
               \"parse_mode\": \"Markdown\"
             }"
