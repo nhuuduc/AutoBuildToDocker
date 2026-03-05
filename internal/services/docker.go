@@ -65,6 +65,7 @@ func getImageWithTag(imageName, tag string) string {
 }
 
 // cloneRepo clones the repository at a specific commit SHA.
+// Uses git init + fetch FETCH_HEAD to reliably fetch any specific commit by full SHA.
 func cloneRepo(repoFullName, commitSHA string) (string, error) {
 	cloneDir := filepath.Join(tempDir, strings.ReplaceAll(repoFullName, "/", "_"))
 	gitURL := "https://github.com/" + repoFullName + ".git"
@@ -73,12 +74,17 @@ func cloneRepo(repoFullName, commitSHA string) (string, error) {
 
 	// Clean up existing directory
 	_ = os.RemoveAll(cloneDir)
+	if err := os.MkdirAll(cloneDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir failed: %w", err)
+	}
 
-	// Clone shallow then fetch specific commit
+	// git init + fetch specific SHA — works with full 40-char SHA on GitHub
+	// (GitHub supports uploadpack.allowReachableSHA1InWant for full SHAs)
 	cmds := [][]string{
-		{"git", "clone", "--depth", "1", gitURL, cloneDir},
+		{"git", "init", cloneDir},
+		{"git", "-C", cloneDir, "remote", "add", "origin", gitURL},
 		{"git", "-C", cloneDir, "fetch", "--depth", "1", "origin", commitSHA},
-		{"git", "-C", cloneDir, "checkout", commitSHA},
+		{"git", "-C", cloneDir, "checkout", "FETCH_HEAD"},
 	}
 
 	var allOutput strings.Builder

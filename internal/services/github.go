@@ -128,6 +128,32 @@ func GetLatestCommit(owner, repo, branch string) (string, error) {
 	return data.Commit.SHA, nil
 }
 
+// ResolveCommitSHA resolves a partial (or full) commit SHA to the full 40-char SHA.
+// Needed because Telegram button data is limited to 64 bytes, so we store truncated SHAs.
+func ResolveCommitSHA(owner, repo, partialSHA string) (string, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s", githubAPIBase, owner, repo, partialSHA)
+	resp, err := githubGet(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return "", fmt.Errorf("commit not found: %s", partialSHA)
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("GitHub API error: %d %s", resp.StatusCode, resp.Status)
+	}
+
+	var data struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", err
+	}
+	return data.SHA, nil
+}
+
 // GetLatestRelease returns the latest release for owner/repo, or nil if none.
 func GetLatestRelease(owner, repo string) (*GitHubRelease, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", githubAPIBase, owner, repo)

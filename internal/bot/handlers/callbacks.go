@@ -117,7 +117,15 @@ func handleModeCallback(c tele.Context, data string) error {
 		return c.Respond(&tele.CallbackResponse{Text: "Repository not found"})
 	}
 
-	services.AddToQueue(repoData.ID, repoFullName, commitSHA, repoData.ImageName, buildMode)
+	// Resolve partial SHA (12 chars from button data) to full 40-char SHA.
+	// Git and GitHub Actions both need the full SHA for reliable fetches.
+	fullSHA, err := services.ResolveCommitSHA(owner, repo, commitSHA)
+	if err != nil {
+		log.Printf("[Callbacks] Could not resolve SHA %s for %s: %v — using partial", commitSHA, repoFullName, err)
+		fullSHA = commitSHA // fallback: use what we have
+	}
+
+	services.AddToQueue(repoData.ID, repoFullName, fullSHA, repoData.ImageName, buildMode)
 
 	modeLabel := "🚀 GitHub Actions"
 	if buildMode == "local" {
