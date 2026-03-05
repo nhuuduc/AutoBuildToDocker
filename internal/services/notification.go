@@ -8,6 +8,14 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
+// shortSHA safely returns up to n chars of a SHA/ref string (avoids panic when SHA is a branch name).
+func shortSHA(sha string, n int) string {
+	if len(sha) <= n {
+		return sha
+	}
+	return sha[:n]
+}
+
 // UpdateNotification holds info for commit/release notification.
 type UpdateNotification struct {
 	Type      string // "commit" or "release"
@@ -64,7 +72,7 @@ func NotifyUser(telegramID int64, update UpdateNotification) error {
 				"🌿 *Branch:* `%s`\n"+
 				"🔗 *SHA:* `%s`\n"+
 				"🐳 *Image:* `%s`",
-			update.Repo, update.Branch, update.SHA[:7], update.ImageName,
+			update.Repo, update.Branch, shortSHA(update.SHA, 7), update.ImageName,
 		)
 	} else {
 		text = fmt.Sprintf(
@@ -73,16 +81,13 @@ func NotifyUser(telegramID int64, update UpdateNotification) error {
 				"🏷️ *Tag:* `%s`\n"+
 				"🔗 *SHA:* `%s`\n"+
 				"🐳 *Image:* `%s`",
-			update.Repo, update.Tag, update.SHA[:7], update.ImageName,
+			update.Repo, update.Tag, shortSHA(update.SHA, 7), update.ImageName,
 		)
 	}
 
 	// Truncate SHA to 12 chars — Telegram callback data limit is 64 bytes.
 	// build:<repo>:<sha12> e.g. "build:zeroclaw-labs/zeroclaw:4705a74abc12" = 44 bytes max
-	sha12 := update.SHA
-	if len(sha12) > 12 {
-		sha12 = sha12[:12]
-	}
+	sha12 := shortSHA(update.SHA, 12)
 	markup = &tele.ReplyMarkup{}
 	buildBtn := markup.Data("🔨 Build Now", "build_trigger",
 		fmt.Sprintf("build:%s:%s", update.Repo, sha12))
