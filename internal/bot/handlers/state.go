@@ -52,7 +52,7 @@ func DeletePending(repoFull, sha12 string) {
 // BuildFeatureKeyboard generates the feature selection inline keyboard for a pending build.
 func BuildFeatureKeyboard(pb *PendingBuild) *tele.ReplyMarkup {
 	kb := &tele.ReplyMarkup{}
-	key := pendingKey(pb.RepoFullName, pb.SHA12)
+	key := pendingKey(pb.RepoFullName, pb.SHA12) // "owner/repo:sha12"
 
 	var rows [][]tele.InlineButton
 	feats := services.AvailableFeatures
@@ -64,21 +64,23 @@ func BuildFeatureKeyboard(pb *PendingBuild) *tele.ReplyMarkup {
 			if pb.Features[f.Key] {
 				label = "✅ " + f.Label
 			}
+			// NOTE: No Unique field — telebot would prepend \f{Unique}| to Data,
+			// which can push past Telegram's 64-byte callback_data limit.
+			// Our generic OnCallback handler routes by Data prefix instead.
 			btn := tele.InlineButton{
-				Text:   label,
-				Unique: "feat_" + f.Key,
-				Data:   fmt.Sprintf("feat:toggle:%s:%s", key, f.Key),
+				Text: label,
+				Data: fmt.Sprintf("feat:toggle:%s:%s", key, f.Key),
 			}
 			row = append(row, btn)
 		}
 		rows = append(rows, row)
 	}
 
-	// Build Now button
+	// Build Now — encode buildMode in data to survive server restarts
+	// format: feat:build:{mode}:{owner/repo}:{sha12}
 	buildBtn := tele.InlineButton{
-		Text:   "▶️ Build Now",
-		Unique: "feat_build",
-		Data:   fmt.Sprintf("feat:build:%s", key),
+		Text: "▶️ Build Now",
+		Data: fmt.Sprintf("feat:build:%s:%s", pb.BuildMode, key),
 	}
 	rows = append(rows, []tele.InlineButton{buildBtn})
 	kb.InlineKeyboard = rows

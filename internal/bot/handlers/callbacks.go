@@ -32,6 +32,8 @@ func handleCallback(c tele.Context) error {
 		data = data[idx+1:]
 	}
 
+	log.Printf("[Callbacks] Routing on: %q", data) // show exact bytes after stripping
+
 	switch {
 	case strings.HasPrefix(data, "build:"):
 		return handleBuildCallback(c, data)
@@ -42,6 +44,7 @@ func handleCallback(c tele.Context) error {
 	case strings.HasPrefix(data, "feat:"):
 		return handleFeatCallback(c, data)
 	default:
+		log.Printf("[Callbacks] No matching handler for: %q", data)
 		return c.Respond(&tele.CallbackResponse{Text: "Unknown action"})
 	}
 }
@@ -49,6 +52,7 @@ func handleCallback(c tele.Context) error {
 // ── build: ────────────────────────────────────────────────────────────────────
 
 // handleBuildCallback — format: build:owner/repo:commitSHA (from scheduler notification)
+// Shows a mode selection menu (Local / GitHub Actions) before queuing.
 func handleBuildCallback(c tele.Context, data string) error {
 	parts := strings.SplitN(data, ":", 3)
 	if len(parts) < 3 {
@@ -60,7 +64,6 @@ func handleBuildCallback(c tele.Context, data string) error {
 	if len(split) < 2 {
 		return c.Respond(&tele.CallbackResponse{Text: "Invalid repo format"})
 	}
-	owner, repo := split[0], split[1]
 
 	sender := c.Sender()
 	if sender == nil {
@@ -72,32 +75,58 @@ func handleBuildCallback(c tele.Context, data string) error {
 		return c.Respond(&tele.CallbackResponse{Text: "User not found. Please /start first."})
 	}
 
+	owner, repo := split[0], split[1]
 	repoData, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
 	if repoData == nil {
 		return c.Respond(&tele.CallbackResponse{Text: "Repository not found"})
 	}
-
-	services.AddToQueue(repoData.ID, repoFullName, commitSHA, repoData.ImageName, "actions")
 	_ = db.DeleteConfirmationsByRepo(repoData.ID)
 
-	editText := fmt.Sprintf("✅ *Build Queued*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`",
-		repoFullName, commitSHA)
-	_ = c.Edit(editText, tele.ModeMarkdown)
+	// Truncate SHA to 12 chars for button data (64 byte Telegram limit)
+	sha12 := commitSHA
+	if len(sha12) > 12 {
+		sha12 = sha12[:12]
+	}
 
-	return c.Respond(&tele.CallbackResponse{Text: "Build queued!"})
+	// Show mode selection: Local vs GitHub Actions
+	btnLocal := tele.InlineButton{
+		Text:   "🖥️ Local Server",
+		Unique: "mode_local",
+		Data:   fmt.Sprintf("mode:local:%s:%s", repoFullName, sha12),
+	}
+	btnActions := tele.InlineButton{
+		Text:   "🚀 GitHub Actions",
+		Unique: "mode_actions",
+		Data:   fmt.Sprintf("mode:actions:%s:%s", repoFullName, sha12),
+	}
+	kb := &tele.ReplyMarkup{}
+	kb.InlineKeyboard = [][]tele.InlineButton{{btnLocal, btnActions}}
+
+	editText := fmt.Sprintf(
+		"🐳 *Build:* `%s`\n🔗 Commit: `%s`\n\nChọn nơi build:",
+		repoFullName, sha12[:min(7, len(sha12))],
+	)
+	if editErr := c.Edit(editText, tele.ModeMarkdown, kb); editErr != nil {
+		log.Printf("[Build] Edit failed: %v — sending new message", editErr)
+		_ = c.Send(editText, tele.ModeMarkdown, kb)
+	}
+	return c.Respond(&tele.CallbackResponse{Text: "Chọn nơi build"})
 }
 
 // ── mode: ─────────────────────────────────────────────────────────────────────
 
 // handleModeCallback — format: mode:local:owner/repo:sha12 or mode:actions:owner/repo:sha12
 func handleModeCallback(c tele.Context, data string) error {
+	log.Printf("[Mode] Parsing data: %q", data)
 	parts := strings.SplitN(data, ":", 4)
 	if len(parts) < 4 {
+		log.Printf("[Mode] Invalid parts count: %d", len(parts))
 		return c.Respond(&tele.CallbackResponse{Text: "Invalid mode request"})
 	}
 	buildMode := parts[1]    // "local" or "actions"
 	repoFullName := parts[2] // "owner/repo"
 	sha12 := parts[3]
+	log.Printf("[Mode] buildMode=%s repo=%s sha=%s", buildMode, repoFullName, sha12)
 
 	split := strings.SplitN(repoFullName, "/", 2)
 	if len(split) < 2 {
@@ -109,30 +138,35 @@ func handleModeCallback(c tele.Context, data string) error {
 	if sender == nil {
 		return c.Respond(&tele.CallbackResponse{Text: "Cannot identify user"})
 	}
+	log.Printf("[Mode] sender ID=%d", sender.ID)
 
-	dbUser, _ := db.FindUserByTelegramID(sender.ID)
+	dbUser, err := db.FindUserByTelegramID(sender.ID)
+	if err != nil {
+		log.Printf("[Mode] DB error finding user %d: %v", sender.ID, err)
+	}
 	if dbUser == nil {
+		log.Printf("[Mode] User not found for TelegramID=%d", sender.ID)
 		return c.Respond(&tele.CallbackResponse{Text: "User not found. Please /start first."})
 	}
 
-	repoData, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	repoData, err := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	if err != nil {
+		log.Printf("[Mode] DB error finding repo %s: %v", repoFullName, err)
+	}
 	if repoData == nil {
+		log.Printf("[Mode] Repo not found: %s for userID=%d", repoFullName, dbUser.ID)
 		return c.Respond(&tele.CallbackResponse{Text: "Repository not found"})
 	}
+	log.Printf("[Mode] Found repo ID=%d", repoData.ID)
 
 	// Resolve short SHA → full 40-char SHA
 	fullSHA, err := services.ResolveCommitSHA(owner, repo, sha12)
 	if err != nil {
-		log.Printf("[Callbacks] Could not resolve SHA %s for %s: %v — using partial", sha12, repoFullName, err)
+		log.Printf("[Mode] Could not resolve SHA %s: %v — using partial", sha12, err)
 		fullSHA = sha12
 	}
 
-	modeEmoji := "🖥️"
-	if buildMode == "actions" {
-		modeEmoji = "🚀"
-	}
-
-	// Both modes show feature selection menu
+	// Both modes: store pending state and show feature selection menu
 	pb := &PendingBuild{
 		RepoID:       repoData.ID,
 		RepoFullName: repoFullName,
@@ -144,16 +178,24 @@ func handleModeCallback(c tele.Context, data string) error {
 	}
 	StorePending(pb)
 
-	modeLabel := "Local Server"
+	modeEmoji := "🖥️"
+	modeLabel := "Local Build"
 	if buildMode == "actions" {
-		modeLabel = "GitHub Actions"
+		modeEmoji = "🚀"
+		modeLabel = "GitHub Actions Build"
 	}
 	editText := fmt.Sprintf(
-		"%s *%s Build:* `%s`\n🔗 Commit: `%s`\n\n🛠️ *Select optional features:*",
+		"%s *%s:* `%s`\n🔗 Commit: `%s`\n\n🛠️ *Select optional features to install:*",
 		modeEmoji, modeLabel, repoFullName, sha12[:min(7, len(sha12))],
 	)
 	kb := BuildFeatureKeyboard(pb)
-	_ = c.Edit(editText, tele.ModeMarkdown, kb)
+	if editErr := c.Edit(editText, tele.ModeMarkdown, kb); editErr != nil {
+		log.Printf("[Mode] Edit failed: %v — sending new message", editErr)
+		if _, sendErr := c.Bot().Send(c.Chat(), editText, tele.ModeMarkdown, kb); sendErr != nil {
+			log.Printf("[Mode] Send also failed: %v", sendErr)
+		}
+	}
+	log.Printf("[Mode] Feature menu shown for %s @ %s mode=%s", repoFullName, sha12, buildMode)
 	return c.Respond(&tele.CallbackResponse{Text: "Choose features →"})
 }
 
@@ -200,49 +242,100 @@ func handleFeatCallback(c tele.Context, data string) error {
 		}
 
 		kb := BuildFeatureKeyboard(pb)
+		modeEmoji2 := "🖥️"
+		modeLabel2 := "Local"
+		if pb.BuildMode == "actions" {
+			modeEmoji2 = "🚀"
+			modeLabel2 = "GitHub Actions"
+		}
 		editText := fmt.Sprintf(
-			"🖥️ *Local Build:* `%s`\n🔗 Commit: `%s`\n\n🛠️ *Select optional features:*",
-			repoFull, sha12[:min(7, len(sha12))],
+			"%s *%s Build:* `%s`\n🔗 Commit: `%s`\n\n🛠️ *Select optional features:*",
+			modeEmoji2, modeLabel2, repoFull, sha12[:min(7, len(sha12))],
 		)
 		_ = c.Edit(editText, tele.ModeMarkdown, kb)
 		return c.Respond(&tele.CallbackResponse{Text: label + " " + status})
 
 	case "build":
-		// rest = "owner/repo:sha12"
-		colonIdx := strings.LastIndex(rest, ":")
+		// New format: rest = "mode:owner/repo:sha12"
+		// e.g. "actions:RightNow-AI/openfang:ebcdc17c138e"
+		buildModeAndRest := strings.SplitN(rest, ":", 2)
+		if len(buildModeAndRest) < 2 {
+			return c.Respond(&tele.CallbackResponse{Text: "Invalid build data"})
+		}
+		buildMode := buildModeAndRest[0]  // "local" or "actions"
+		repoAndSha := buildModeAndRest[1] // "owner/repo:sha12"
+
+		colonIdx := strings.LastIndex(repoAndSha, ":")
 		if colonIdx < 0 {
 			return c.Respond(&tele.CallbackResponse{Text: "Invalid build data"})
 		}
-		repoFull := rest[:colonIdx]
-		sha12 := rest[colonIdx+1:]
+		repoFull := repoAndSha[:colonIdx]
+		sha12 := repoAndSha[colonIdx+1:]
 
+		// Try to get pending state (features selected by user)
 		pb := GetPending(repoFull, sha12)
-		if pb == nil {
-			return c.Respond(&tele.CallbackResponse{Text: "Session expired. Please /build again."})
-		}
 
-		// Collect selected features in order
 		var selectedFeatures []string
-		for _, f := range services.AvailableFeatures {
-			if pb.Features[f.Key] {
-				selectedFeatures = append(selectedFeatures, f.Key)
+		var repoID int64
+		var fullSHA, imageName string
+
+		if pb != nil {
+			// Happy path: pending state exists with selected features
+			for _, f := range services.AvailableFeatures {
+				if pb.Features[f.Key] {
+					selectedFeatures = append(selectedFeatures, f.Key)
+				}
 			}
+			repoID = pb.RepoID
+			fullSHA = pb.FullSHA
+			imageName = pb.ImageName
+			DeletePending(repoFull, sha12)
+		} else {
+			// Fallback: server restarted, look up from DB
+			log.Printf("[Feat] Pending state lost for %s @ %s — doing DB lookup", repoFull, sha12)
+			sender := c.Sender()
+			if sender == nil {
+				return c.Respond(&tele.CallbackResponse{Text: "Cannot identify user"})
+			}
+			dbUser, _ := db.FindUserByTelegramID(sender.ID)
+			if dbUser == nil {
+				return c.Respond(&tele.CallbackResponse{Text: "Session expired. Please /build again."})
+			}
+			repoParts := strings.SplitN(repoFull, "/", 2)
+			if len(repoParts) < 2 {
+				return c.Respond(&tele.CallbackResponse{Text: "Invalid repo"})
+			}
+			repoData, _ := db.FindRepoByUserAndFullName(dbUser.ID, repoParts[0], repoParts[1])
+			if repoData == nil {
+				return c.Respond(&tele.CallbackResponse{Text: "Repository not found"})
+			}
+			repoID = repoData.ID
+			imageName = repoData.ImageName
+			fullSHA = sha12 // best we can do without pending state
+			// No features selected (state lost)
 		}
 
-		services.AddToQueueWithFeatures(pb.RepoID, pb.RepoFullName, pb.FullSHA, pb.ImageName, pb.BuildMode, selectedFeatures)
-		DeletePending(repoFull, sha12)
+		services.AddToQueueWithFeatures(repoID, repoFull, fullSHA, imageName, buildMode, selectedFeatures)
 
 		featDesc := "none"
 		if len(selectedFeatures) > 0 {
 			featDesc = strings.Join(selectedFeatures, ", ")
 		}
+		buildEmoji := "🖥️"
+		buildLabel := "Local Build"
+		if buildMode == "actions" {
+			buildEmoji = "🚀"
+			buildLabel = "GitHub Actions Build"
+		}
 		editText := fmt.Sprintf(
-			"🖥️ *Local Build Queued!*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`\n🛠️ Features: `%s`",
-			repoFull, sha12[:min(7, len(sha12))], featDesc,
+			"%s *%s Queued!*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`\n🛠️ Features: `%s`",
+			buildEmoji, buildLabel, repoFull, sha12[:min(7, len(sha12))], featDesc,
 		)
-		_ = c.Edit(editText, tele.ModeMarkdown)
-
-		log.Printf("[Callbacks] Local build queued for %s @ %s features=%v", repoFull, sha12, selectedFeatures)
+		if editErr := c.Edit(editText, tele.ModeMarkdown); editErr != nil {
+			log.Printf("[Feat] Edit failed on build confirm: %v", editErr)
+			_ = c.Send(editText, tele.ModeMarkdown)
+		}
+		log.Printf("[Feat] %s build queued for %s @ %s features=%v", buildMode, repoFull, sha12, selectedFeatures)
 		return c.Respond(&tele.CallbackResponse{Text: "✅ Build queued!"})
 	}
 

@@ -17,13 +17,14 @@ type Feature struct {
 }
 
 // AvailableFeatures is the ordered list of selectable features.
+// RunCmds auto-detect Alpine (apk) vs Debian/Ubuntu (apt-get).
 var AvailableFeatures = []Feature{
 	{
 		Key:   "python3",
 		Label: "Python3",
 		Emoji: "🐍",
 		RunCmds: []string{
-			"apk add --no-cache python3 py3-pip",
+			`if command -v apk >/dev/null 2>&1; then apk add --no-cache python3 py3-pip; else apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*; fi`,
 		},
 	},
 	{
@@ -31,9 +32,9 @@ var AvailableFeatures = []Feature{
 		Label: "Playwright",
 		Emoji: "🎭",
 		RunCmds: []string{
-			"apk add --no-cache python3 py3-pip chromium chromium-chromedriver",
-			"pip3 install --break-system-packages playwright",
-			"playwright install chromium",
+			`if command -v apk >/dev/null 2>&1; then apk add --no-cache python3 py3-pip chromium chromium-chromedriver; else apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip chromium && rm -rf /var/lib/apt/lists/*; fi`,
+			`pip3 install --break-system-packages playwright`,
+			`playwright install chromium --with-deps`,
 		},
 	},
 	{
@@ -41,7 +42,7 @@ var AvailableFeatures = []Feature{
 		Label: "Node.js",
 		Emoji: "💚",
 		RunCmds: []string{
-			"apk add --no-cache nodejs npm",
+			`if command -v apk >/dev/null 2>&1; then apk add --no-cache nodejs npm; else apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists/*; fi`,
 		},
 	},
 	{
@@ -49,7 +50,7 @@ var AvailableFeatures = []Feature{
 		Label: "FFmpeg",
 		Emoji: "🎬",
 		RunCmds: []string{
-			"apk add --no-cache ffmpeg",
+			`if command -v apk >/dev/null 2>&1; then apk add --no-cache ffmpeg; else apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*; fi`,
 		},
 	},
 }
