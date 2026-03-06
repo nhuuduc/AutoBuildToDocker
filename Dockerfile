@@ -3,7 +3,7 @@
 # ── Stage 1: Build ──────────────────────────────────────────────────────────
 # BUILDPLATFORM = host runner platform (always linux/amd64 on GitHub Actions)
 # TARGETPLATFORM = the platform we're building FOR (amd64 or arm64)
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 ARG TARGETARCH
 ARG TARGETOS=linux

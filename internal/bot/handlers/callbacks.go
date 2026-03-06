@@ -89,15 +89,16 @@ func handleBuildCallback(c tele.Context, data string) error {
 	}
 
 	// Show mode selection: Local vs GitHub Actions
+	// NOTE: No Unique field — telebot prepends \f{Unique}| to Data, which can
+	// push past Telegram's 64-byte callback_data limit for longer repo names.
+	// Our generic OnCallback handler routes by Data prefix ("mode:") instead.
 	btnLocal := tele.InlineButton{
-		Text:   "🖥️ Local Server",
-		Unique: "mode_local",
-		Data:   fmt.Sprintf("mode:local:%s:%s", repoFullName, sha12),
+		Text: "🖥️ Local Server",
+		Data: fmt.Sprintf("mode:local:%s:%s", repoFullName, sha12),
 	}
 	btnActions := tele.InlineButton{
-		Text:   "🚀 GitHub Actions",
-		Unique: "mode_actions",
-		Data:   fmt.Sprintf("mode:actions:%s:%s", repoFullName, sha12),
+		Text: "🚀 GitHub Actions",
+		Data: fmt.Sprintf("mode:actions:%s:%s", repoFullName, sha12),
 	}
 	kb := &tele.ReplyMarkup{}
 	kb.InlineKeyboard = [][]tele.InlineButton{{btnLocal, btnActions}}
