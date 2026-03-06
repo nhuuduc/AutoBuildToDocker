@@ -304,7 +304,7 @@ func processActionsBuild(job *BuildJob) {
 		Repo:      job.RepoName,
 		Status:    "running",
 		ImageName: imageRef,
-		Message:   fmt.Sprintf("GitHub Actions started\\! [View run](https://github.com/%s/actions)", builderRepo),
+		Message:   fmt.Sprintf("GitHub Actions started! [View run](https://github.com/%s/actions)", builderRepo),
 	})
 
 	go pollWorkflowResult(job, builderRepo, dispatchedAt)

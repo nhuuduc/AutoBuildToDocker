@@ -19,26 +19,61 @@ on:
         description: "Comma-separated optional features (e.g. python3,playwright,nodejs,ffmpeg)"
         required: false
         default: ""
+      platforms:
+        description: "Comma-separated platforms (e.g. linux/amd64, linux/arm64, or linux/amd64,linux/arm64)"
+        required: false
+        default: "linux/amd64,linux/arm64"
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
+  # ── Compute which platforms to build ────────────────────────────────────────
+  setup:
+    name: Setup matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      slugs: ${{ steps.set.outputs.slugs }}
+    steps:
+      - name: Resolve platform matrix
+        id: set
+        run: |
+          PLATFORMS="${{ inputs.platforms }}"
+          # Build JSON array for matrix
+          MATRIX="["
+          SLUGS=""
+          FIRST=true
+          IFS=',' read -ra PARTS <<< "$PLATFORMS"
+          for p in "${PARTS[@]}"; do
+            p=$(echo "$p" | xargs)  # trim whitespace
+            slug="${p//\//-}"       # linux/amd64 → linux-amd64
+            if [ "$FIRST" = true ]; then
+              FIRST=false
+            else
+              MATRIX+=","
+              SLUGS+=","
+            fi
+            MATRIX+="{\"platform\":\"$p\",\"slug\":\"$slug\"}"
+            SLUGS+="$slug"
+          done
+          MATRIX+="]"
+          echo "matrix={\"include\":$MATRIX}" >> "$GITHUB_OUTPUT"
+          echo "slugs=$SLUGS" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $MATRIX"
+          echo "Slugs: $SLUGS"
+
   # ── Build each platform in parallel — NO QEMU (Go cross-compile) ──────────
   build:
     name: Build (${{ matrix.slug }})
     runs-on: ubuntu-latest
+    needs: setup
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            slug: linux-amd64
-          - platform: linux/arm64
-            slug: linux-arm64
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
 
     steps:
       - name: Checkout source repo
@@ -111,7 +146,7 @@ jobs:
   merge:
     name: Merge & Notify
     runs-on: ubuntu-latest
-    needs: build
+    needs: [setup, build]
     permissions:
       packages: write
 
@@ -123,28 +158,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create and push multi-arch manifest
+      - name: Create and push manifest
         env:
           SHA: ${{ inputs.commit_sha }}
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}
+          SLUGS: ${{ needs.setup.outputs.slugs }}
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
-          docker buildx imagetools create \
-            --tag "${IMAGE}:latest" \
-            --tag "${IMAGE}:${SHA}" \
-            "${IMAGE}:linux-amd64-${SHA}" \
-            "${IMAGE}:linux-arm64-${SHA}"
-          echo "✅ Multi-arch manifest pushed: ${IMAGE}:latest"
+          # Build list of source images from slugs
+          IFS=',' read -ra SLUG_PARTS <<< "$SLUGS"
+          SOURCES=""
+          for slug in "${SLUG_PARTS[@]}"; do
+            slug=$(echo "$slug" | xargs)
+            SOURCES+=" ${IMAGE}:${slug}-${SHA}"
+          done
+
+          if [ $(echo "$SLUGS" | tr ',' '\n' | wc -l) -gt 1 ]; then
+            # Multi-platform: create manifest list
+            docker buildx imagetools create \
+              --tag "${IMAGE}:latest" \
+              --tag "${IMAGE}:${SHA}" \
+              $SOURCES
+            echo "✅ Multi-arch manifest pushed: ${IMAGE}:latest"
+          else
+            # Single platform: just re-tag
+            SINGLE_TAG=$(echo "$SOURCES" | xargs)
+            docker buildx imagetools create \
+              --tag "${IMAGE}:latest" \
+              --tag "${IMAGE}:${SHA}" \
+              $SINGLE_TAG
+            echo "✅ Single-platform image tagged: ${IMAGE}:latest"
+          fi
 
       - name: Notify Telegram — Success
         env:
           SHA: ${{ inputs.commit_sha }}
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "{
               \"chat_id\": \"${{ inputs.telegram_chat_id }}\",
-              \"text\": \"✅ *Build Successful!*\n\n📦 *Repo:* \`${{ inputs.repo }}\`\n🔗 *Commit:* \`${SHA:0:7}\`\n🐳 *Image:* \`${IMAGE}:latest\`\n🖥️ Platforms: linux/amd64, linux/arm64\n🔗 [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
+              \"text\": \"✅ *Build Successful!*\n\n📦 *Repo:* \`${{ inputs.repo }}\`\n🔗 *Commit:* \`${SHA:0:7}\`\n🐳 *Image:* \`${IMAGE}:latest\`\n🖥️ Platforms: ${PLATFORMS}\n🔗 [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
               \"parse_mode\": \"Markdown\"
             }"
 
