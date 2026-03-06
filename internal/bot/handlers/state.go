@@ -8,7 +8,7 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-// PendingBuild holds state for a local build awaiting feature selection.
+// PendingBuild holds state for a build awaiting platform + feature selection.
 type PendingBuild struct {
 	RepoID       int64
 	RepoFullName string // "owner/repo"
@@ -16,6 +16,7 @@ type PendingBuild struct {
 	SHA12        string // 12-char truncated (used as map key suffix)
 	ImageName    string
 	BuildMode    string          // "local" or "actions"
+	Platforms    string          // "amd64", "arm64", or "both" (empty = not chosen yet)
 	Features     map[string]bool // feature key → selected
 }
 
@@ -47,6 +48,43 @@ func DeletePending(repoFull, sha12 string) {
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
 	delete(pendingBuilds, pendingKey(repoFull, sha12))
+}
+
+// modeInfo returns (emoji, label) for a build mode string.
+func modeInfo(mode string) (string, string) {
+	if mode == "actions" {
+		return "🚀", "GitHub Actions"
+	}
+	return "🖥️", "Local"
+}
+
+// BuildPlatformKeyboard shows platform selection: amd64 / arm64 / both.
+// callback format: plat:{arch}:{owner/repo}:{sha12}
+// "Next" button format: plat:next:{owner/repo}:{sha12}
+func BuildPlatformKeyboard(pb *PendingBuild) *tele.ReplyMarkup {
+	kb := &tele.ReplyMarkup{}
+	key := pendingKey(pb.RepoFullName, pb.SHA12)
+
+	check := func(arch string) string {
+		if pb.Platforms == arch {
+			return "✅ "
+		}
+		return ""
+	}
+
+	kb.InlineKeyboard = [][]tele.InlineButton{
+		{
+			{Text: check("amd64") + "linux/amd64", Data: fmt.Sprintf("plat:amd64:%s", key)},
+			{Text: check("arm64") + "linux/arm64", Data: fmt.Sprintf("plat:arm64:%s", key)},
+		},
+		{
+			{Text: check("both") + "amd64 + arm64", Data: fmt.Sprintf("plat:both:%s", key)},
+		},
+		{
+			{Text: "Next: Features →", Data: fmt.Sprintf("plat:next:%s", key)},
+		},
+	}
+	return kb
 }
 
 // BuildFeatureKeyboard generates the feature selection inline keyboard for a pending build.

@@ -22,6 +22,7 @@ type BuildJob struct {
 	BuildID      int64 // DB row ID
 	DispatchedAt time.Time
 	BuildMode    string   // "local" or "actions"
+	Platforms    string   // "amd64", "arm64", or "both"
 	Features     []string // optional addon features for local builds
 }
 
@@ -63,11 +64,15 @@ func GetQueueStats() map[string]int {
 // AddToQueue enqueues a new build job.
 // buildMode: "local" = build on this server, "actions" = dispatch to GitHub Actions.
 func AddToQueue(repoID int64, repoName, commitSHA, imageName, buildMode string) {
-	AddToQueueWithFeatures(repoID, repoName, commitSHA, imageName, buildMode, nil)
+	AddToQueueWithFeatures(repoID, repoName, commitSHA, imageName, buildMode, "amd64", nil)
 }
 
 // AddToQueueWithFeatures enqueues a build job with optional addon features (local mode only).
-func AddToQueueWithFeatures(repoID int64, repoName, commitSHA, imageName, buildMode string, features []string) {
+// platforms: "amd64", "arm64", or "both" — controls which Docker platforms are built.
+func AddToQueueWithFeatures(repoID int64, repoName, commitSHA, imageName, buildMode, platforms string, features []string) {
+	if platforms == "" {
+		platforms = "amd64"
+	}
 	if buildMode == "" {
 		buildMode = "actions"
 	}
@@ -96,6 +101,7 @@ func AddToQueueWithFeatures(repoID int64, repoName, commitSHA, imageName, buildM
 		ChatID:    user.TelegramID,
 		BuildID:   buildID,
 		BuildMode: buildMode,
+		Platforms: platforms,
 		Features:  features,
 	}
 
@@ -257,6 +263,15 @@ func processActionsBuild(job *BuildJob) {
 
 	imageName := slugifyImage(job.ImageName)
 
+	// Convert platform key to Docker platform string(s)
+	platformStr := "linux/amd64"
+	switch job.Platforms {
+	case "arm64":
+		platformStr = "linux/arm64"
+	case "both":
+		platformStr = "linux/amd64,linux/arm64"
+	}
+
 	dispatchedAt := time.Now().UTC()
 	err := TriggerWorkflowDispatch(builderRepo, "docker-build.yml", "main", map[string]string{
 		"repo":             job.RepoName,
@@ -264,6 +279,7 @@ func processActionsBuild(job *BuildJob) {
 		"image_name":       imageName,
 		"telegram_chat_id": fmt.Sprintf("%d", job.ChatID),
 		"features":         strings.Join(job.Features, ","),
+		"platforms":        platformStr,
 	})
 	if err != nil {
 		log.Printf("[Queue] Dispatch failed for %s: %v", job.RepoName, err)
