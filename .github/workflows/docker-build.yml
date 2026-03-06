@@ -79,13 +79,19 @@ jobs:
           python3 - <<'PYEOF'
           import os, subprocess, sys
           image = os.environ["IMAGE"]
+          # Auto-detect apk (Alpine) vs apt-get (Debian/Ubuntu) at build time
+          _apk  = "command -v apk >/dev/null 2>&1"
+          def _pkg(*pkgs_apk, deb=None):
+              deb_pkgs = deb if deb else list(pkgs_apk)
+              deb_cmd  = f"DEBIAN_FRONTEND=noninteractive apt-get install -y {' '.join(deb_pkgs)} && rm -rf /var/lib/apt/lists/*"
+              return f"if {_apk}; then apk add --no-cache {' '.join(pkgs_apk)}; else apt-get update -qq && {deb_cmd}; fi"
           feature_cmds = {
-            "python3":    ["RUN apk add --no-cache python3 py3-pip"],
-            "playwright": ["RUN apk add --no-cache python3 py3-pip chromium chromium-chromedriver",
+            "python3":    [f"RUN {_pkg('python3', 'py3-pip', deb=['python3', 'python3-pip'])}"],
+            "playwright": [f"RUN {_pkg('python3', 'py3-pip', 'chromium', 'chromium-chromedriver', deb=['python3', 'python3-pip', 'chromium'])}",
                            "RUN pip3 install --break-system-packages playwright",
-                           "RUN playwright install chromium"],
-            "nodejs":     ["RUN apk add --no-cache nodejs npm"],
-            "ffmpeg":     ["RUN apk add --no-cache ffmpeg"],
+                           "RUN playwright install chromium --with-deps"],
+            "nodejs":     [f"RUN {_pkg('nodejs', 'npm')}"],
+            "ffmpeg":     [f"RUN {_pkg('ffmpeg')}"],
           }
           features = [f.strip() for f in os.environ["FEATURES"].split(",") if f.strip()]
           lines = [f"FROM {image}"]
@@ -99,6 +105,7 @@ jobs:
           docker build --progress=plain -t "${IMAGE}" -f /tmp/Dockerfile.addon /tmp
           docker push "${IMAGE}"
           echo "✅ Addon layer pushed: ${IMAGE}"
+
 
   # ── Merge into multi-arch manifest + notify ────────────────────────────────
   merge:
