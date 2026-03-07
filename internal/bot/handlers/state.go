@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -10,10 +12,11 @@ import (
 
 // PendingBuild holds state for a build awaiting platform + feature selection.
 type PendingBuild struct {
+	SessionID    string // short random ID used in callback data (8 hex chars)
 	RepoID       int64
 	RepoFullName string // "owner/repo"
 	FullSHA      string // full 40-char SHA
-	SHA12        string // 12-char truncated (used as map key suffix)
+	SHA7         string // 7-char truncated (for display only)
 	ImageName    string
 	BuildMode    string          // "local" or "actions"
 	Platforms    string          // "amd64", "arm64", or "both" (empty = not chosen yet)
@@ -22,32 +25,38 @@ type PendingBuild struct {
 
 var (
 	pendingMu     sync.Mutex
-	pendingBuilds = map[string]*PendingBuild{} // key: "owner/repo:sha12"
+	pendingBuilds = map[string]*PendingBuild{} // key: sessionID
 )
 
-func pendingKey(repoFull, sha12 string) string {
-	return repoFull + ":" + sha12
+// newSessionID generates a short random hex string (8 chars = 4 bytes).
+func newSessionID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
-// StorePending saves a pending build state.
+// StorePending saves a pending build state, generating a session ID if needed.
 func StorePending(pb *PendingBuild) {
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
-	pendingBuilds[pendingKey(pb.RepoFullName, pb.SHA12)] = pb
+	if pb.SessionID == "" {
+		pb.SessionID = newSessionID()
+	}
+	pendingBuilds[pb.SessionID] = pb
 }
 
-// GetPending retrieves a pending build state.
-func GetPending(repoFull, sha12 string) *PendingBuild {
+// GetPendingBySession retrieves a pending build state by session ID.
+func GetPendingBySession(sessionID string) *PendingBuild {
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
-	return pendingBuilds[pendingKey(repoFull, sha12)]
+	return pendingBuilds[sessionID]
 }
 
 // DeletePending removes a pending build state.
-func DeletePending(repoFull, sha12 string) {
+func DeletePending(sessionID string) {
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
-	delete(pendingBuilds, pendingKey(repoFull, sha12))
+	delete(pendingBuilds, sessionID)
 }
 
 // modeInfo returns (emoji, label) for a build mode string.
@@ -59,11 +68,12 @@ func modeInfo(mode string) (string, string) {
 }
 
 // BuildPlatformKeyboard shows platform selection: amd64 / arm64 / both.
-// callback format: plat:{arch}:{owner/repo}:{sha12}
-// "Next" button format: plat:next:{owner/repo}:{sha12}
+// All callback data uses short sessionID to stay well within 64-byte limit.
+// callback format: plat:{arch}:{sessionID}
+// "Next" button format: plat:next:{sessionID}
 func BuildPlatformKeyboard(pb *PendingBuild) *tele.ReplyMarkup {
 	kb := &tele.ReplyMarkup{}
-	key := pendingKey(pb.RepoFullName, pb.SHA12)
+	sid := pb.SessionID
 
 	check := func(arch string) string {
 		if pb.Platforms == arch {
@@ -74,23 +84,26 @@ func BuildPlatformKeyboard(pb *PendingBuild) *tele.ReplyMarkup {
 
 	kb.InlineKeyboard = [][]tele.InlineButton{
 		{
-			{Text: check("amd64") + "linux/amd64", Data: fmt.Sprintf("plat:amd64:%s", key)},
-			{Text: check("arm64") + "linux/arm64", Data: fmt.Sprintf("plat:arm64:%s", key)},
+			{Text: check("amd64") + "linux/amd64", Data: fmt.Sprintf("plat:amd64:%s", sid)},
+			{Text: check("arm64") + "linux/arm64", Data: fmt.Sprintf("plat:arm64:%s", sid)},
 		},
 		{
-			{Text: check("both") + "amd64 + arm64", Data: fmt.Sprintf("plat:both:%s", key)},
+			{Text: check("both") + "amd64 + arm64", Data: fmt.Sprintf("plat:both:%s", sid)},
 		},
 		{
-			{Text: "Next: Features →", Data: fmt.Sprintf("plat:next:%s", key)},
+			{Text: "Next: Features →", Data: fmt.Sprintf("plat:next:%s", sid)},
 		},
 	}
 	return kb
 }
 
 // BuildFeatureKeyboard generates the feature selection inline keyboard for a pending build.
+// Uses sessionID + numeric feature index to keep callback data very short.
+// toggle format: feat:toggle:{sessionID}:{featureIndex}  (max ~25 bytes)
+// build format:  feat:build:{sessionID}                   (max ~20 bytes)
 func BuildFeatureKeyboard(pb *PendingBuild) *tele.ReplyMarkup {
 	kb := &tele.ReplyMarkup{}
-	key := pendingKey(pb.RepoFullName, pb.SHA12) // "owner/repo:sha12"
+	sid := pb.SessionID
 
 	var rows [][]tele.InlineButton
 	feats := services.AvailableFeatures
@@ -102,23 +115,19 @@ func BuildFeatureKeyboard(pb *PendingBuild) *tele.ReplyMarkup {
 			if pb.Features[f.Key] {
 				label = "✅ " + f.Label
 			}
-			// NOTE: No Unique field — telebot would prepend \f{Unique}| to Data,
-			// which can push past Telegram's 64-byte callback_data limit.
-			// Our generic OnCallback handler routes by Data prefix instead.
 			btn := tele.InlineButton{
 				Text: label,
-				Data: fmt.Sprintf("feat:toggle:%s:%s", key, f.Key),
+				Data: fmt.Sprintf("feat:toggle:%s:%d", sid, j),
 			}
 			row = append(row, btn)
 		}
 		rows = append(rows, row)
 	}
 
-	// Build Now — encode buildMode in data to survive server restarts
-	// format: feat:build:{mode}:{owner/repo}:{sha12}
+	// Build Now
 	buildBtn := tele.InlineButton{
 		Text: "▶️ Build Now",
-		Data: fmt.Sprintf("feat:build:%s:%s", pb.BuildMode, key),
+		Data: fmt.Sprintf("feat:build:%s", sid),
 	}
 	rows = append(rows, []tele.InlineButton{buildBtn})
 	kb.InlineKeyboard = rows

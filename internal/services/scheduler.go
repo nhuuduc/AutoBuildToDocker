@@ -89,6 +89,7 @@ func checkRepository(repo db.Repository) error {
 
 		_ = NotifyUser(user.TelegramID, UpdateNotification{
 			Type:      "commit",
+			RepoID:    repo.ID,
 			Repo:      fullName,
 			Branch:    repo.Branch,
 			SHA:       latestCommit,
@@ -110,6 +111,7 @@ func checkRepository(repo db.Repository) error {
 
 		_ = NotifyUser(user.TelegramID, UpdateNotification{
 			Type:      "release",
+			RepoID:    repo.ID,
 			Repo:      fullName,
 			Tag:       release.Tag,
 			SHA:       release.SHA,

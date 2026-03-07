@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/nhd/autobuildtodocker/internal/db"
@@ -53,8 +54,8 @@ func handleCallback(c tele.Context) error {
 
 // ── build: ────────────────────────────────────────────────────────────────────
 
-// handleBuildCallback — format: build:owner/repo:commitSHA (from scheduler notification)
-// Shows a mode selection menu (Local / GitHub Actions) before queuing.
+// handleBuildCallback — format: build:{repoID}:{sha8} (from scheduler notification)
+// Creates a session and shows a mode selection menu (Local / GitHub Actions).
 func handleBuildCallback(c tele.Context, data string) error {
 	// Respond immediately for snappy UX — Telegram shows loading until we do this.
 	_ = c.Respond(&tele.CallbackResponse{})
@@ -63,54 +64,58 @@ func handleBuildCallback(c tele.Context, data string) error {
 	if len(parts) < 3 {
 		return c.Respond(&tele.CallbackResponse{Text: "Invalid build request"})
 	}
-	repoFullName := parts[1]
+	repoIDStr := parts[1]
 	commitSHA := parts[2]
-	split := strings.SplitN(repoFullName, "/", 2)
-	if len(split) < 2 {
+
+	repoID, err := strconv.ParseInt(repoIDStr, 10, 64)
+	if err != nil {
+		log.Printf("[Build] Invalid repoID: %s", repoIDStr)
 		return nil
 	}
 
-	sender := c.Sender()
-	if sender == nil {
-		return nil
-	}
-
-	dbUser, _ := db.FindUserByTelegramID(sender.ID)
-	if dbUser == nil {
-		return nil
-	}
-
-	owner, repo := split[0], split[1]
-	repoData, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	repoData, _ := db.FindRepoByID(repoID)
 	if repoData == nil {
 		return nil
 	}
 	_ = db.DeleteConfirmationsByRepo(repoData.ID)
 
-	// Truncate SHA to 12 chars for button data (64 byte Telegram limit)
-	sha12 := commitSHA
-	if len(sha12) > 12 {
-		sha12 = sha12[:12]
+	repoFullName := fmt.Sprintf("%s/%s", repoData.Owner, repoData.Repo)
+
+	// SHA for display (7 chars)
+	sha7 := commitSHA
+	if len(sha7) > 7 {
+		sha7 = sha7[:7]
 	}
 
+	// Create a session early so mode buttons use short session IDs
+	// (avoids 64-byte limit with long repo names)
+	pb := &PendingBuild{
+		RepoID:       repoData.ID,
+		RepoFullName: repoFullName,
+		FullSHA:      commitSHA,
+		SHA7:         sha7,
+		ImageName:    repoData.ImageName,
+		Platforms:    "amd64", // sensible default
+		Features:     map[string]bool{},
+	}
+	StorePending(pb)
+
 	// Show mode selection: Local vs GitHub Actions
-	// NOTE: No Unique field — telebot prepends \f{Unique}| to Data, which can
-	// push past Telegram's 64-byte callback_data limit for longer repo names.
-	// Our generic OnCallback handler routes by Data prefix ("mode:") instead.
+	// Uses session ID → max ~20 bytes callback data
 	btnLocal := tele.InlineButton{
 		Text: "🖥️ Local Server",
-		Data: fmt.Sprintf("mode:local:%s:%s", repoFullName, sha12),
+		Data: fmt.Sprintf("mode:local:%s", pb.SessionID),
 	}
 	btnActions := tele.InlineButton{
 		Text: "🚀 GitHub Actions",
-		Data: fmt.Sprintf("mode:actions:%s:%s", repoFullName, sha12),
+		Data: fmt.Sprintf("mode:actions:%s", pb.SessionID),
 	}
 	kb := &tele.ReplyMarkup{}
 	kb.InlineKeyboard = [][]tele.InlineButton{{btnLocal, btnActions}}
 
 	editText := fmt.Sprintf(
 		"🐳 *Build:* `%s`\n🔗 Commit: `%s`\n\nChọn nơi build:",
-		repoFullName, sha12[:min(7, len(sha12))],
+		repoFullName, sha7,
 	)
 	if editErr := c.Edit(editText, tele.ModeMarkdown, kb); editErr != nil {
 		log.Printf("[Build] Edit failed: %v — sending new message", editErr)
@@ -121,78 +126,47 @@ func handleBuildCallback(c tele.Context, data string) error {
 
 // ── mode: ─────────────────────────────────────────────────────────────────────
 
-// handleModeCallback — format: mode:local:owner/repo:sha12 or mode:actions:owner/repo:sha12
-// Now shows platform selection (amd64/arm64/both) instead of jumping straight to features.
+// handleModeCallback — format: mode:{local|actions}:{sessionID}
+// Sets the build mode and shows platform selection.
 func handleModeCallback(c tele.Context, data string) error {
 	// Respond immediately — heavy work (DB + GitHub API) follows.
 	_ = c.Respond(&tele.CallbackResponse{})
 
 	log.Printf("[Mode] Parsing data: %q", data)
-	parts := strings.SplitN(data, ":", 4)
-	if len(parts) < 4 {
+	parts := strings.SplitN(data, ":", 3)
+	if len(parts) < 3 {
 		log.Printf("[Mode] Invalid parts count: %d", len(parts))
 		return nil
 	}
-	buildMode := parts[1]    // "local" or "actions"
-	repoFullName := parts[2] // "owner/repo"
-	sha12 := parts[3]
-	log.Printf("[Mode] buildMode=%s repo=%s sha=%s", buildMode, repoFullName, sha12)
+	buildMode := parts[1] // "local" or "actions"
+	sessionID := parts[2]
+	log.Printf("[Mode] buildMode=%s session=%s", buildMode, sessionID)
 
+	pb := GetPendingBySession(sessionID)
+	if pb == nil {
+		_ = c.Edit("⚠️ Session expired. Please click Build again.", tele.ModeMarkdown)
+		return nil
+	}
+
+	// Set build mode
+	pb.BuildMode = buildMode
+
+	// Resolve short SHA → full 40-char SHA if we only have a partial
+	repoFullName := pb.RepoFullName
 	split := strings.SplitN(repoFullName, "/", 2)
-	if len(split) < 2 {
-		return nil
+	if len(split) >= 2 {
+		fullSHA, err := services.ResolveCommitSHA(split[0], split[1], pb.FullSHA)
+		if err != nil {
+			log.Printf("[Mode] Could not resolve SHA %s: %v — using partial", pb.FullSHA, err)
+		} else {
+			pb.FullSHA = fullSHA
+		}
 	}
-	owner, repo := split[0], split[1]
-
-	sender := c.Sender()
-	if sender == nil {
-		return nil
-	}
-	log.Printf("[Mode] sender ID=%d", sender.ID)
-
-	dbUser, err := db.FindUserByTelegramID(sender.ID)
-	if err != nil {
-		log.Printf("[Mode] DB error finding user %d: %v", sender.ID, err)
-	}
-	if dbUser == nil {
-		log.Printf("[Mode] User not found for TelegramID=%d", sender.ID)
-		return nil
-	}
-
-	repoData, err := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
-	if err != nil {
-		log.Printf("[Mode] DB error finding repo %s: %v", repoFullName, err)
-	}
-	if repoData == nil {
-		log.Printf("[Mode] Repo not found: %s for userID=%d", repoFullName, dbUser.ID)
-		return nil
-	}
-	log.Printf("[Mode] Found repo ID=%d", repoData.ID)
-
-	// Resolve short SHA → full 40-char SHA
-	fullSHA, err := services.ResolveCommitSHA(owner, repo, sha12)
-	if err != nil {
-		log.Printf("[Mode] Could not resolve SHA %s: %v — using partial", sha12, err)
-		fullSHA = sha12
-	}
-
-	// Store pending state and show platform selection menu
-	pb := &PendingBuild{
-		RepoID:       repoData.ID,
-		RepoFullName: repoFullName,
-		FullSHA:      fullSHA,
-		SHA12:        sha12,
-		ImageName:    repoData.ImageName,
-		BuildMode:    buildMode,
-		Platforms:    "amd64", // sensible default
-		Features:     map[string]bool{},
-	}
-	StorePending(pb)
 
 	modeEmoji, modeLabel := modeInfo(buildMode)
 	editText := fmt.Sprintf(
 		"%s *%s:* `%s`\n🔗 Commit: `%s`\n\n🖥️ *Chọn platform build:*",
-		modeEmoji, modeLabel, repoFullName, sha12[:min(7, len(sha12))],
+		modeEmoji, modeLabel, repoFullName, pb.SHA7,
 	)
 	kb := BuildPlatformKeyboard(pb)
 	if editErr := c.Edit(editText, tele.ModeMarkdown, kb); editErr != nil {
@@ -201,36 +175,25 @@ func handleModeCallback(c tele.Context, data string) error {
 			log.Printf("[Mode] Send also failed: %v", sendErr)
 		}
 	}
-	log.Printf("[Mode] Platform menu shown for %s @ %s mode=%s", repoFullName, sha12, buildMode)
+	log.Printf("[Mode] Platform menu shown for %s session=%s mode=%s", repoFullName, sessionID, buildMode)
 	return nil
 }
 
 // ── plat: ─────────────────────────────────────────────────────────────────────
 
-// handlePlatCallback — format: plat:{arch|next}:{owner/repo}:{sha12}
+// handlePlatCallback — format: plat:{arch|next}:{sessionID}
 func handlePlatCallback(c tele.Context, data string) error {
 	// Respond immediately for fast UX
 	_ = c.Respond(&tele.CallbackResponse{})
 
-	// data = "plat:amd64:owner/repo:sha12" or "plat:next:owner/repo:sha12"
-	// Split into at most 3 parts after "plat:"
-	rest := strings.TrimPrefix(data, "plat:")
-	colonIdx := strings.Index(rest, ":")
-	if colonIdx < 0 {
+	parts := strings.SplitN(data, ":", 3)
+	if len(parts) < 3 {
 		return nil
 	}
-	action := rest[:colonIdx]       // "amd64", "arm64", "both", or "next"
-	repoAndSha := rest[colonIdx+1:] // "owner/repo:sha12"
+	action := parts[1] // "amd64", "arm64", "both", or "next"
+	sessionID := parts[2]
 
-	// Extract sha12 as last colon-separated token
-	lastColon := strings.LastIndex(repoAndSha, ":")
-	if lastColon < 0 {
-		return nil
-	}
-	repoFull := repoAndSha[:lastColon]
-	sha12 := repoAndSha[lastColon+1:]
-
-	pb := GetPending(repoFull, sha12)
+	pb := GetPendingBySession(sessionID)
 	if pb == nil {
 		_ = c.Edit("⚠️ Session expired. Please click Build again.", tele.ModeMarkdown)
 		return nil
@@ -243,7 +206,7 @@ func handlePlatCallback(c tele.Context, data string) error {
 		pb.Platforms = action
 		editText := fmt.Sprintf(
 			"%s *%s:* `%s`\n🔗 Commit: `%s`\n\n🖥️ *Chọn platform build:*",
-			modeEmoji, modeLabel, repoFull, sha12[:min(7, len(sha12))],
+			modeEmoji, modeLabel, pb.RepoFullName, pb.SHA7,
 		)
 		kb := BuildPlatformKeyboard(pb)
 		_ = c.Edit(editText, tele.ModeMarkdown, kb)
@@ -252,13 +215,13 @@ func handlePlatCallback(c tele.Context, data string) error {
 		// Move to feature selection
 		editText := fmt.Sprintf(
 			"%s *%s:* `%s`\n🔗 Commit: `%s`\n📦 Platform: `%s`\n\n🛠️ *Chọn optional features:*",
-			modeEmoji, modeLabel, repoFull, sha12[:min(7, len(sha12))], platLabel(pb.Platforms),
+			modeEmoji, modeLabel, pb.RepoFullName, pb.SHA7, platLabel(pb.Platforms),
 		)
 		kb := BuildFeatureKeyboard(pb)
 		if editErr := c.Edit(editText, tele.ModeMarkdown, kb); editErr != nil {
 			log.Printf("[Plat] Edit failed: %v", editErr)
 		}
-		log.Printf("[Plat] Feature menu shown for %s @ %s plat=%s", repoFull, sha12, pb.Platforms)
+		log.Printf("[Plat] Feature menu shown for %s session=%s plat=%s", pb.RepoFullName, sessionID, pb.Platforms)
 	}
 	return nil
 }
@@ -277,7 +240,7 @@ func platLabel(p string) string {
 
 // ── feat: ─────────────────────────────────────────────────────────────────────
 
-// handleFeatCallback — format: feat:toggle:owner/repo:sha12:featureKey or feat:build:owner/repo:sha12
+// handleFeatCallback — format: feat:toggle:{sessionID}:{featureIndex} or feat:build:{sessionID}
 func handleFeatCallback(c tele.Context, data string) error {
 	// Respond immediately for fast UX
 	_ = c.Respond(&tele.CallbackResponse{})
@@ -287,24 +250,27 @@ func handleFeatCallback(c tele.Context, data string) error {
 		return nil
 	}
 	action := parts[1] // "toggle" or "build"
-	rest := parts[2]   // "owner/repo:sha12[:featureKey]"
+	rest := parts[2]   // "{sessionID}:{featureIndex}" or "{sessionID}"
 
 	switch action {
 	case "toggle":
-		// rest = "owner/repo:sha12:featureKey"
-		lastColon := strings.LastIndex(rest, ":")
-		if lastColon < 0 {
+		// rest = "sessionID:featureIndex"
+		colonIdx := strings.LastIndex(rest, ":")
+		if colonIdx < 0 {
 			return nil
 		}
-		pbKey := rest[:lastColon] // "owner/repo:sha12"
-		featureKey := rest[lastColon+1:]
+		sessionID := rest[:colonIdx]
+		featureIdxStr := rest[colonIdx+1:]
 
-		// pbKey format = "owner/repo:sha12"
-		colonIdx := strings.LastIndex(pbKey, ":")
-		repoFull := pbKey[:colonIdx]
-		sha12 := pbKey[colonIdx+1:]
+		// Parse numeric feature index
+		featureIdx, err := strconv.Atoi(featureIdxStr)
+		if err != nil || featureIdx < 0 || featureIdx >= len(services.AvailableFeatures) {
+			log.Printf("[Feat] Invalid feature index: %s", featureIdxStr)
+			return nil
+		}
+		featureKey := services.AvailableFeatures[featureIdx].Key
 
-		pb := GetPending(repoFull, sha12)
+		pb := GetPendingBySession(sessionID)
 		if pb == nil {
 			_ = c.Edit("⚠️ Session expired. Please click Build again.", tele.ModeMarkdown)
 			return nil
@@ -312,10 +278,7 @@ func handleFeatCallback(c tele.Context, data string) error {
 
 		// Toggle feature
 		pb.Features[featureKey] = !pb.Features[featureKey]
-		label := featureKey
-		if f := services.FeatureByKey(featureKey); f != nil {
-			label = f.Label
-		}
+		label := services.AvailableFeatures[featureIdx].Label
 		status := "off"
 		if pb.Features[featureKey] {
 			status = "on"
@@ -325,33 +288,20 @@ func handleFeatCallback(c tele.Context, data string) error {
 		modeEmoji, modeLabel := modeInfo(pb.BuildMode)
 		editText := fmt.Sprintf(
 			"%s *%s:* `%s`\n🔗 Commit: `%s`\n📦 Platform: `%s`\n\n🛠️ *Chọn optional features:*",
-			modeEmoji, modeLabel, repoFull, sha12[:min(7, len(sha12))], platLabel(pb.Platforms),
+			modeEmoji, modeLabel, pb.RepoFullName, pb.SHA7, platLabel(pb.Platforms),
 		)
 		_ = c.Edit(editText, tele.ModeMarkdown, kb)
 		log.Printf("[Feat] toggle %s → %s", label, status)
 
 	case "build":
-		// New format: rest = "mode:owner/repo:sha12"
-		buildModeAndRest := strings.SplitN(rest, ":", 2)
-		if len(buildModeAndRest) < 2 {
-			return nil
-		}
-		buildMode := buildModeAndRest[0]  // "local" or "actions"
-		repoAndSha := buildModeAndRest[1] // "owner/repo:sha12"
-
-		colonIdx := strings.LastIndex(repoAndSha, ":")
-		if colonIdx < 0 {
-			return nil
-		}
-		repoFull := repoAndSha[:colonIdx]
-		sha12 := repoAndSha[colonIdx+1:]
+		sessionID := rest
 
 		// Try to get pending state (features + platform selected by user)
-		pb := GetPending(repoFull, sha12)
+		pb := GetPendingBySession(sessionID)
 
 		var selectedFeatures []string
 		var repoID int64
-		var fullSHA, imageName, platforms string
+		var fullSHA, imageName, platforms, buildMode, repoFull, sha7 string
 
 		if pb != nil {
 			for _, f := range services.AvailableFeatures {
@@ -360,33 +310,18 @@ func handleFeatCallback(c tele.Context, data string) error {
 				}
 			}
 			repoID = pb.RepoID
+			repoFull = pb.RepoFullName
 			fullSHA = pb.FullSHA
 			imageName = pb.ImageName
 			platforms = pb.Platforms
-			DeletePending(repoFull, sha12)
+			buildMode = pb.BuildMode
+			sha7 = pb.SHA7
+			DeletePending(sessionID)
 		} else {
 			// Fallback: server restarted, look up from DB
-			log.Printf("[Feat] Pending state lost for %s @ %s — doing DB lookup", repoFull, sha12)
-			sender := c.Sender()
-			if sender == nil {
-				return nil
-			}
-			dbUser, _ := db.FindUserByTelegramID(sender.ID)
-			if dbUser == nil {
-				return nil
-			}
-			repoParts := strings.SplitN(repoFull, "/", 2)
-			if len(repoParts) < 2 {
-				return nil
-			}
-			repoData, _ := db.FindRepoByUserAndFullName(dbUser.ID, repoParts[0], repoParts[1])
-			if repoData == nil {
-				return nil
-			}
-			repoID = repoData.ID
-			imageName = repoData.ImageName
-			fullSHA = sha12 // best we can do without pending state
-			platforms = "amd64"
+			log.Printf("[Feat] Pending state lost for session %s — doing DB lookup", sessionID)
+			_ = c.Edit("⚠️ Session expired. Please click Build again.", tele.ModeMarkdown)
+			return nil
 		}
 
 		services.AddToQueueWithFeatures(repoID, repoFull, fullSHA, imageName, buildMode, platforms, selectedFeatures)
@@ -398,13 +333,13 @@ func handleFeatCallback(c tele.Context, data string) error {
 		buildEmoji, buildLabel := modeInfo(buildMode)
 		editText := fmt.Sprintf(
 			"%s *%s Queued!*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`\n🖥️ Platform: `%s`\n🛠️ Features: `%s`",
-			buildEmoji, buildLabel+" Build", repoFull, sha12[:min(7, len(sha12))], platLabel(platforms), featDesc,
+			buildEmoji, buildLabel+" Build", repoFull, sha7, platLabel(platforms), featDesc,
 		)
 		if editErr := c.Edit(editText, tele.ModeMarkdown); editErr != nil {
 			log.Printf("[Feat] Edit failed on build confirm: %v", editErr)
 			_ = c.Send(editText, tele.ModeMarkdown)
 		}
-		log.Printf("[Feat] %s build queued for %s @ %s plat=%s features=%v", buildMode, repoFull, sha12, platforms, selectedFeatures)
+		log.Printf("[Feat] %s build queued for %s session=%s plat=%s features=%v", buildMode, repoFull, sessionID, platforms, selectedFeatures)
 	}
 
 	return nil
@@ -412,7 +347,7 @@ func handleFeatCallback(c tele.Context, data string) error {
 
 // ── skip: ─────────────────────────────────────────────────────────────────────
 
-// handleSkipCallback — format: skip:owner/repo
+// handleSkipCallback — format: skip:{repoID}
 func handleSkipCallback(c tele.Context, data string) error {
 	_ = c.Respond(&tele.CallbackResponse{})
 
@@ -420,28 +355,20 @@ func handleSkipCallback(c tele.Context, data string) error {
 	if len(parts) < 2 {
 		return nil
 	}
-	repoFullName := parts[1]
-	split := strings.SplitN(repoFullName, "/", 2)
-	if len(split) < 2 {
-		return nil
-	}
-	owner, repo := split[0], split[1]
 
-	sender := c.Sender()
-	if sender == nil {
+	repoID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		log.Printf("[Skip] Invalid repoID: %s", parts[1])
 		return nil
 	}
 
-	dbUser, _ := db.FindUserByTelegramID(sender.ID)
-	if dbUser == nil {
+	repoData, _ := db.FindRepoByID(repoID)
+	if repoData == nil {
 		return nil
 	}
+	_ = db.DeleteConfirmationsByRepo(repoData.ID)
 
-	repoData, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
-	if repoData != nil {
-		_ = db.DeleteConfirmationsByRepo(repoData.ID)
-	}
-
+	repoFullName := fmt.Sprintf("%s/%s", repoData.Owner, repoData.Repo)
 	editText := fmt.Sprintf("⏭️ *Update Skipped*\n\n📦 Repository: `%s`", repoFullName)
 	_ = c.Edit(editText, tele.ModeMarkdown)
 	return nil

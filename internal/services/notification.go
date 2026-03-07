@@ -19,6 +19,7 @@ func shortSHA(sha string, n int) string {
 // UpdateNotification holds info for commit/release notification.
 type UpdateNotification struct {
 	Type      string // "commit" or "release"
+	RepoID    int64  // DB repo ID — used in button data to avoid long repo names
 	Repo      string
 	Branch    string
 	SHA       string
@@ -85,15 +86,17 @@ func NotifyUser(telegramID int64, update UpdateNotification) error {
 		)
 	}
 
-	// Truncate SHA to 12 chars — Telegram callback data limit is 64 bytes.
-	// build:<repo>:<sha12> e.g. "build:zeroclaw-labs/zeroclaw:4705a74abc12" = 44 bytes max
-	sha12 := shortSHA(update.SHA, 12)
+	// Use raw InlineButton (no Unique field) to avoid telebot prepending
+	// \f{Unique}| to callback data — would exceed 64-byte limit for long repo names.
+	// Use RepoID instead of repo name: "build:{repoID}:{sha8}" → max ~25 bytes.
+	sha8 := shortSHA(update.SHA, 8)
 	markup = &tele.ReplyMarkup{}
-	buildBtn := markup.Data("🔨 Build Now", "build_trigger",
-		fmt.Sprintf("build:%s:%s", update.Repo, sha12))
-	skipBtn := markup.Data("Skip", "skip_trigger",
-		fmt.Sprintf("skip:%s", update.Repo))
-	markup.Inline(markup.Row(buildBtn, skipBtn))
+	markup.InlineKeyboard = [][]tele.InlineButton{
+		{
+			{Text: "🔨 Build Now", Data: fmt.Sprintf("build:%d:%s", update.RepoID, sha8)},
+			{Text: "Skip", Data: fmt.Sprintf("skip:%d", update.RepoID)},
+		},
+	}
 
 	_, err := bot.Send(chat, text, &tele.SendOptions{
 		ParseMode:   tele.ModeMarkdown,
