@@ -3,6 +3,7 @@ version: '3.8'
 services:
   app:
     build: .
+    platform: linux/amd64
     container_name: cicd-telegram-bot
     environment:
       - NODE_ENV=production

@@ -247,30 +247,37 @@ func handleBuild(c tele.Context) error {
 
 	repoFull := fmt.Sprintf("%s/%s", owner, repo)
 
-	// Truncate SHA to 12 chars — Telegram callback data limit is 64 bytes.
-	// mode:actions:<repo>:<sha12> e.g. "mode:actions:zeroclaw-labs/zeroclaw:4705a74abc12" = 48 bytes
-	sha12 := commitSHA
-	if len(sha12) > 12 {
-		sha12 = sha12[:12]
+	sha7 := commitSHA
+	if len(sha7) > 7 {
+		sha7 = sha7[:7]
 	}
 
-	// Inline keyboard: choose build mode
-	// NOTE: No Unique field — telebot prepends \f{Unique}| to Data, which can
-	// push past Telegram's 64-byte callback_data limit for longer repo names.
+	// Create a session so mode buttons use short sessionID (avoids 64-byte limit).
+	pb := &PendingBuild{
+		RepoID:       r.ID,
+		RepoFullName: repoFull,
+		FullSHA:      commitSHA,
+		SHA7:         sha7,
+		ImageName:    r.ImageName,
+		Platforms:    "amd64",
+		Features:     map[string]bool{},
+	}
+	StorePending(pb)
+
 	btnLocal := tele.InlineButton{
 		Text: "🖥️ Local Server",
-		Data: fmt.Sprintf("mode:local:%s:%s", repoFull, sha12),
+		Data: fmt.Sprintf("mode:local:%s", pb.SessionID),
 	}
 	btnActions := tele.InlineButton{
 		Text: "🚀 GitHub Actions",
-		Data: fmt.Sprintf("mode:actions:%s:%s", repoFull, sha12),
+		Data: fmt.Sprintf("mode:actions:%s", pb.SessionID),
 	}
 
 	kb := &tele.ReplyMarkup{}
 	kb.InlineKeyboard = [][]tele.InlineButton{{btnLocal, btnActions}}
 
 	return c.Send(
-		fmt.Sprintf("🐳 *Build:* `%s`\n🔗 Commit: `%s`\n\nChọn nơi build:", repoFull, commitSHA[:7]),
+		fmt.Sprintf("🐳 *Build:* `%s`\n🔗 Commit: `%s`\n\nChọn nơi build:", repoFull, sha7),
 		tele.ModeMarkdown, kb,
 	)
 }
