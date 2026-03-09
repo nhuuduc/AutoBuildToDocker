@@ -193,7 +193,13 @@ func pushImage(imageName string) (string, error) {
 
 // cleanup removes the temporary clone directory.
 func cleanup(repoFullName string) {
-	cloneDir := filepath.Join(tempDir, strings.ReplaceAll(repoFullName, "/", "_"))
+	var cloneDir string
+	if repoFullName == "local/ubuntu-os" {
+		cloneDir = filepath.Join(tempDir, "local_ubuntu-os")
+	} else {
+		cloneDir = filepath.Join(tempDir, strings.ReplaceAll(repoFullName, "/", "_"))
+	}
+
 	if err := os.RemoveAll(cloneDir); err != nil {
 		log.Printf("[Docker] Cleanup failed for %s: %v", cloneDir, err)
 	} else {
@@ -221,11 +227,31 @@ func BuildAndPush(req BuildRequest) BuildResult {
 		dockerfilePath = "Dockerfile"
 	}
 
-	// Step 1: Clone
-	appendLog("Cloning repository...")
-	cloneDir, err := cloneRepo(req.RepoFullName, req.CommitSHA)
+	// Step 1: Clone or Generate Strategy
+	var cloneDir string
+	var err error
+
+	if req.RepoFullName == "local/ubuntu-os" {
+		appendLog("OS Build detected. Generating base Ubuntu Dockerfile...")
+		cloneDir = filepath.Join(tempDir, "local_ubuntu-os")
+		_ = os.RemoveAll(cloneDir)
+		if err = os.MkdirAll(cloneDir, 0o755); err != nil {
+			err = fmt.Errorf("failed to create os build dir: %w", err)
+		} else {
+			dockerfileContent := `FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+`
+			if err = os.WriteFile(filepath.Join(cloneDir, dockerfilePath), []byte(dockerfileContent), 0o644); err != nil {
+				err = fmt.Errorf("failed to write os base Dockerfile: %w", err)
+			}
+		}
+	} else {
+		appendLog("Cloning repository...")
+		cloneDir, err = cloneRepo(req.RepoFullName, req.CommitSHA)
+	}
+
 	if err != nil {
-		appendLog("Clone failed: " + err.Error())
+		appendLog("Setup failed: " + err.Error())
 		cleanup(req.RepoFullName)
 		return BuildResult{
 			Success:   false,
@@ -234,7 +260,7 @@ func BuildAndPush(req BuildRequest) BuildResult {
 			Error:     err.Error(),
 		}
 	}
-	appendLog("Repository cloned successfully")
+	appendLog("Build environment ready")
 
 	// Step 2: Build
 	appendLog("Building Docker image...")

@@ -22,6 +22,7 @@ func RegisterCommands(bot *tele.Bot) {
 	bot.Handle("/status", handleStatus)
 	bot.Handle("/settings", handleSettings)
 	bot.Handle("/help", handleStart) // alias
+	bot.Handle("/os", handleOS)
 }
 
 // RouteCommand dispatches a command string and args to the right handler.
@@ -48,6 +49,8 @@ func RouteCommand(cmd, args string, c tele.Context) error {
 		return handleStatus(c)
 	case "/settings":
 		return handleSettings(c)
+	case "/os":
+		return handleOS(c)
 	default:
 		return c.Send("❓ Unknown command: `"+cmd+"`. Type /help for available commands.", tele.ModeMarkdown)
 	}
@@ -69,6 +72,7 @@ func handleStart(c tele.Context) error {
 			"`/remove <owner/repo>` — Remove a repository\n"+
 			"`/build <owner/repo>` — Trigger a manual build\n"+
 			"`/builds [owner/repo]` — Show build history\n"+
+			"`/os` — Build a custom Ubuntu OS image\n"+
 			"`/status` — Show queue status\n"+
 			"`/settings` — Bot settings\n"+
 			"`/help` — Show this message",
@@ -357,4 +361,52 @@ func handleSettings(c tele.Context) error {
 		"⚙️ *Settings*\n\nYou have %d repositor%s tracked.",
 		len(repos), suffix,
 	), tele.ModeMarkdown)
+}
+
+// ─── /os ─────────────────────────────────────────────────────────────────────
+
+func handleOS(c tele.Context) error {
+	user := c.Sender()
+	if user == nil {
+		return c.Send("Unable to get user information.")
+	}
+	dbUser, _ := db.FindUserByTelegramID(user.ID)
+	if dbUser == nil {
+		return c.Send("Please run /start first.")
+	}
+
+	owner := "local"
+	repo := "ubuntu-os"
+	imageName := "ubuntu-os-custom"
+
+	// Ensure the dummy repo exists for this user
+	r, _ := db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	if r == nil {
+		_, err := db.CreateRepo(dbUser.ID, owner, repo, "main", "Dockerfile", imageName, "docker.io", 0)
+		if err != nil {
+			return c.Send("❌ Failed to initialize OS build: " + err.Error())
+		}
+		r, _ = db.FindRepoByUserAndFullName(dbUser.ID, owner, repo)
+	}
+
+	repoFullName := fmt.Sprintf("%s/%s", owner, repo)
+	sha7 := "latest " // padding to match UI
+
+	// Create a session for the build
+	pb := &PendingBuild{
+		RepoID:       r.ID,
+		RepoFullName: repoFullName,
+		FullSHA:      "ubuntu-24.04-base",
+		SHA7:         sha7,
+		ImageName:    imageName,
+		Platforms:    "amd64", // default, will be overridden by plat selection
+		Features:     map[string]bool{},
+		BuildMode:    "local", // Only local supported for OS builder
+	}
+	StorePending(pb)
+
+	editText := "🖥️ *Local Server Build*\n\n📦 *Image:* `Ubuntu 24.04 (Base)`\n\n🖥️ *Chọn platform build:*"
+	kb := BuildPlatformKeyboard(pb)
+
+	return c.Send(editText, tele.ModeMarkdown, kb)
 }
