@@ -288,6 +288,25 @@ RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib
 			Error:     err.Error(),
 		}
 	}
+
+	// Apply patches for specific repositories
+	if strings.Contains(strings.ToLower(req.RepoFullName), "skyclaw") {
+		appendLog("Skyclaw detected. Patching Dockerfile to use Rust 1.85 and fix ENV warning...")
+		dPath := filepath.Join(cloneDir, dockerfilePath)
+		if content, err := os.ReadFile(dPath); err == nil {
+			patched := strings.Replace(string(content), "FROM rust:1.82", "FROM rust:1.85", 1)
+			// Replace ENV TELEGRAM_BOT_TOKEN="" with ARG TELEGRAM_BOT_TOKEN="" to avoid warnings
+			patched = strings.Replace(patched, "ENV TELEGRAM_BOT_TOKEN=\"\"", "ARG TELEGRAM_BOT_TOKEN=\"\"", 1)
+			if err := os.WriteFile(dPath, []byte(patched), 0o644); err != nil {
+				appendLog(fmt.Sprintf("Warning: failed to write patched Dockerfile: %v", err))
+			} else {
+				appendLog("Successfully patched Skyclaw Dockerfile")
+			}
+		} else {
+			appendLog(fmt.Sprintf("Warning: failed to read Dockerfile for patching: %v", err))
+		}
+	}
+
 	appendLog("Build environment ready")
 
 	// Step 2: Build
