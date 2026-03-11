@@ -24,6 +24,7 @@ type BuildJob struct {
 	BuildMode    string   // "local" or "actions"
 	Platforms    string   // "amd64", "arm64", or "both"
 	Features     []string // optional addon features for local builds
+	VersionTag   string   // GitHub release tag (e.g. "v0.3.46")
 }
 
 // ─── Queue ───────────────────────────────────────────────────────────────────
@@ -64,12 +65,13 @@ func GetQueueStats() map[string]int {
 // AddToQueue enqueues a new build job.
 // buildMode: "local" = build on this server, "actions" = dispatch to GitHub Actions.
 func AddToQueue(repoID int64, repoName, commitSHA, imageName, buildMode string) {
-	AddToQueueWithFeatures(repoID, repoName, commitSHA, imageName, buildMode, "amd64", nil)
+	AddToQueueWithFeatures(repoID, repoName, commitSHA, imageName, buildMode, "amd64", nil, "")
 }
 
 // AddToQueueWithFeatures enqueues a build job with optional addon features (local mode only).
 // platforms: "amd64", "arm64", or "both" — controls which Docker platforms are built.
-func AddToQueueWithFeatures(repoID int64, repoName, commitSHA, imageName, buildMode, platforms string, features []string) {
+// versionTag: GitHub release tag (e.g. "v0.3.46"), empty for commit-only builds.
+func AddToQueueWithFeatures(repoID int64, repoName, commitSHA, imageName, buildMode, platforms string, features []string, versionTag string) {
 	if platforms == "" {
 		platforms = "amd64"
 	}
@@ -94,15 +96,16 @@ func AddToQueueWithFeatures(repoID int64, repoName, commitSHA, imageName, buildM
 	}
 
 	job := &BuildJob{
-		RepoID:    repoID,
-		RepoName:  repoName,
-		CommitSHA: commitSHA,
-		ImageName: imageName,
-		ChatID:    user.TelegramID,
-		BuildID:   buildID,
-		BuildMode: buildMode,
-		Platforms: platforms,
-		Features:  features,
+		RepoID:     repoID,
+		RepoName:   repoName,
+		CommitSHA:  commitSHA,
+		ImageName:  imageName,
+		ChatID:     user.TelegramID,
+		BuildID:    buildID,
+		BuildMode:  buildMode,
+		Platforms:  platforms,
+		Features:   features,
+		VersionTag: versionTag,
 	}
 
 	statsMu.Lock()
@@ -168,6 +171,7 @@ func processLocalBuild(job *BuildJob) {
 		CommitSHA:      job.CommitSHA,
 		ImageName:      job.ImageName,
 		DockerfilePath: dockerfilePath,
+		VersionTag:     job.VersionTag,
 	})
 
 	statsMu.Lock()
@@ -197,7 +201,7 @@ func processLocalBuild(job *BuildJob) {
 				return
 			}
 			// Re-push with addon layer
-			if pushedImage, pushErr := pushImage(job.ImageName); pushErr != nil {
+			if pushedImage, pushErr := pushImage(job.ImageName, job.VersionTag); pushErr != nil {
 				log.Printf("[Queue] Addon push failed for %s: %v", job.RepoName, pushErr)
 			} else {
 				result.ImageName = pushedImage
@@ -213,11 +217,15 @@ func processLocalBuild(job *BuildJob) {
 		if len(job.Features) > 0 {
 			featMsg = fmt.Sprintf(" (+%s)", strings.Join(job.Features, ", "))
 		}
+		verMsg := ""
+		if job.VersionTag != "" {
+			verMsg = fmt.Sprintf("\n🏷️ Version: %s", job.VersionTag)
+		}
 		_ = SendBuildStatus(job.ChatID, BuildStatus{
 			Repo:      job.RepoName,
 			Status:    "success",
 			ImageName: result.ImageName,
-			Message:   "✅ Local build & push completed!" + featMsg,
+			Message:   "✅ Local build & push completed!" + featMsg + verMsg,
 		})
 	} else {
 		_ = db.UpdateBuildStatus(job.BuildID, "failed", result.Error)
@@ -280,6 +288,7 @@ func processActionsBuild(job *BuildJob) {
 		"telegram_chat_id": fmt.Sprintf("%d", job.ChatID),
 		"features":         strings.Join(job.Features, ","),
 		"platforms":        platformStr,
+		"version_tag":      job.VersionTag,
 	})
 	if err != nil {
 		log.Printf("[Queue] Dispatch failed for %s: %v", job.RepoName, err)

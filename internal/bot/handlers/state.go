@@ -21,6 +21,7 @@ type PendingBuild struct {
 	BuildMode    string          // "local" or "actions"
 	Platforms    string          // "amd64", "arm64", or "both" (empty = not chosen yet)
 	Features     map[string]bool // feature key → selected
+	VersionTag   string          // GitHub release tag (e.g. "v0.3.46"), empty if commit-only
 }
 
 var (

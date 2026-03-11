@@ -23,6 +23,10 @@ on:
         description: "Comma-separated platforms (e.g. linux/amd64, linux/arm64, or linux/amd64,linux/arm64)"
         required: false
         default: "linux/amd64,linux/arm64"
+      version_tag:
+        description: "GitHub release tag to tag the image with (e.g. v0.3.46), optional"
+        required: false
+        default: ""
 
 env:
   REGISTRY: ghcr.io
@@ -164,6 +168,7 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}
           SLUGS: ${{ needs.setup.outputs.slugs }}
           PLATFORMS: ${{ inputs.platforms }}
+          VERSION_TAG: ${{ inputs.version_tag }}
         run: |
           # Build list of source images from slugs
           IFS=',' read -ra SLUG_PARTS <<< "$SLUGS"
@@ -175,17 +180,23 @@ jobs:
 
           if [ $(echo "$SLUGS" | tr ',' '\n' | wc -l) -gt 1 ]; then
             # Multi-platform: create manifest list
+            TAGS="--tag ${IMAGE}:latest --tag ${IMAGE}:${SHA}"
+            if [ -n "$VERSION_TAG" ]; then
+              TAGS="$TAGS --tag ${IMAGE}:${VERSION_TAG}"
+            fi
             docker buildx imagetools create \
-              --tag "${IMAGE}:latest" \
-              --tag "${IMAGE}:${SHA}" \
+              $TAGS \
               $SOURCES
             echo "✅ Multi-arch manifest pushed: ${IMAGE}:latest"
           else
             # Single platform: just re-tag
             SINGLE_TAG=$(echo "$SOURCES" | xargs)
+            TAGS="--tag ${IMAGE}:latest --tag ${IMAGE}:${SHA}"
+            if [ -n "$VERSION_TAG" ]; then
+              TAGS="$TAGS --tag ${IMAGE}:${VERSION_TAG}"
+            fi
             docker buildx imagetools create \
-              --tag "${IMAGE}:latest" \
-              --tag "${IMAGE}:${SHA}" \
+              $TAGS \
               $SINGLE_TAG
             echo "✅ Single-platform image tagged: ${IMAGE}:latest"
           fi
@@ -195,12 +206,17 @@ jobs:
           SHA: ${{ inputs.commit_sha }}
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ inputs.image_name }}
           PLATFORMS: ${{ inputs.platforms }}
+          VERSION_TAG: ${{ inputs.version_tag }}
         run: |
+          VERSION_LINE=""
+          if [ -n "$VERSION_TAG" ]; then
+            VERSION_LINE="\n🏷️ *Version:* \`${VERSION_TAG}\`"
+          fi
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "{
               \"chat_id\": \"${{ inputs.telegram_chat_id }}\",
-              \"text\": \"✅ *Build Successful!*\n\n📦 *Repo:* \`${{ inputs.repo }}\`\n🔗 *Commit:* \`${SHA:0:7}\`\n🐳 *Image:* \`${IMAGE}:latest\`\n🖥️ Platforms: ${PLATFORMS}\n🔗 [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
+              \"text\": \"✅ *Build Successful!*\n\n📦 *Repo:* \`${{ inputs.repo }}\`\n🔗 *Commit:* \`${SHA:0:7}\`\n🐳 *Image:* \`${IMAGE}:latest\`${VERSION_LINE}\n🖥️ Platforms: ${PLATFORMS}\n🔗 [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
               \"parse_mode\": \"Markdown\"
             }"
 

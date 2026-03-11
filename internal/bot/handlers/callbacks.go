@@ -89,6 +89,15 @@ func handleBuildCallback(c tele.Context, data string) error {
 
 	// Create a session early so mode buttons use short session IDs
 	// (avoids 64-byte limit with long repo names)
+
+	// Try to fetch the latest release tag for this repo
+	versionTag := ""
+	release, relErr := services.GetLatestRelease(repoData.Owner, repoData.Repo)
+	if relErr == nil && release != nil {
+		versionTag = release.Tag
+		log.Printf("[Build] Found release tag for %s: %s", repoFullName, versionTag)
+	}
+
 	pb := &PendingBuild{
 		RepoID:       repoData.ID,
 		RepoFullName: repoFullName,
@@ -97,6 +106,7 @@ func handleBuildCallback(c tele.Context, data string) error {
 		ImageName:    repoData.ImageName,
 		Platforms:    "amd64", // sensible default
 		Features:     map[string]bool{},
+		VersionTag:   versionTag,
 	}
 	StorePending(pb)
 
@@ -324,16 +334,20 @@ func handleFeatCallback(c tele.Context, data string) error {
 			return nil
 		}
 
-		services.AddToQueueWithFeatures(repoID, repoFull, fullSHA, imageName, buildMode, platforms, selectedFeatures)
+		services.AddToQueueWithFeatures(repoID, repoFull, fullSHA, imageName, buildMode, platforms, selectedFeatures, pb.VersionTag)
 
 		featDesc := "none"
 		if len(selectedFeatures) > 0 {
 			featDesc = strings.Join(selectedFeatures, ", ")
 		}
 		buildEmoji, buildLabel := modeInfo(buildMode)
+		verLabel := ""
+		if pb.VersionTag != "" {
+			verLabel = fmt.Sprintf("\n🏷️ Version: `%s`", pb.VersionTag)
+		}
 		editText := fmt.Sprintf(
-			"%s *%s Queued!*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`\n🖥️ Platform: `%s`\n🛠️ Features: `%s`",
-			buildEmoji, buildLabel+" Build", repoFull, sha7, platLabel(platforms), featDesc,
+			"%s *%s Queued!*\n\n📦 Repository: `%s`\n🔗 Commit: `%s`\n🖥️ Platform: `%s`\n🛠️ Features: `%s`%s",
+			buildEmoji, buildLabel+" Build", repoFull, sha7, platLabel(platforms), featDesc, verLabel,
 		)
 		if editErr := c.Edit(editText, tele.ModeMarkdown); editErr != nil {
 			log.Printf("[Feat] Edit failed on build confirm: %v", editErr)

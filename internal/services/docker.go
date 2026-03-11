@@ -27,6 +27,7 @@ type BuildRequest struct {
 	ImageName      string
 	DockerfilePath string
 	Branch         string
+	VersionTag     string // GitHub release tag (e.g. "v0.3.46"), empty for commit-only builds
 }
 
 // BuildResult is the outcome of a build.
@@ -126,7 +127,8 @@ func cloneRepo(repoFullName, commitSHA string) (string, error) {
 }
 
 // buildImage builds a Docker image and streams output to log.
-func buildImage(contextDir, imageName, dockerfilePath string) error {
+// If versionTag is non-empty, the image is also tagged with that version.
+func buildImage(contextDir, imageName, dockerfilePath, versionTag string) error {
 	fullImage := getImageWithTag(imageName, "latest")
 	dockerfile := filepath.Join(contextDir, dockerfilePath)
 
@@ -136,9 +138,17 @@ func buildImage(contextDir, imageName, dockerfilePath string) error {
 
 	log.Printf("[Docker] Building image: %s", fullImage)
 	prefix := fmt.Sprintf("[Docker/build %s]", imageName)
-	if err := runLogged(prefix,
-		"docker", "build", "--progress=plain", "-t", fullImage, "-f", dockerfile, contextDir,
-	); err != nil {
+	args := []string{"docker", "build", "--progress=plain", "-t", fullImage}
+
+	// Add version tag if provided
+	if versionTag != "" {
+		versionImage := getImageWithTag(imageName, versionTag)
+		args = append(args, "-t", versionImage)
+		log.Printf("[Docker] Also tagging as: %s", versionImage)
+	}
+
+	args = append(args, "-f", dockerfile, contextDir)
+	if err := runLogged(prefix, args...); err != nil {
 		return fmt.Errorf("docker build failed: %w", err)
 	}
 	log.Printf("[Docker] ✅ Built: %s", fullImage)
@@ -147,7 +157,8 @@ func buildImage(contextDir, imageName, dockerfilePath string) error {
 
 // pushImage logs into registry then pushes the image.
 // For ghcr.io: uses GITHUB_TOKEN as password (DOCKER_PASSWORD can override).
-func pushImage(imageName string) (string, error) {
+// If versionTag is non-empty, the version-tagged image is also pushed.
+func pushImage(imageName, versionTag string) (string, error) {
 	fullImage := getImageWithTag(imageName, "latest")
 	log.Printf("[Docker] Pushing image: %s", fullImage)
 
@@ -188,6 +199,20 @@ func pushImage(imageName string) (string, error) {
 		return "", fmt.Errorf("docker push failed: %w\n%s", err, out)
 	}
 	log.Printf("[Docker] Successfully pushed: %s", fullImage)
+
+	// Also push version-tagged image if provided
+	if versionTag != "" {
+		versionImage := getImageWithTag(imageName, versionTag)
+		log.Printf("[Docker] Also pushing version tag: %s", versionImage)
+		vPushCmd := exec.Command("docker", "push", versionImage)
+		if vOut, vErr := vPushCmd.CombinedOutput(); vErr != nil {
+			log.Printf("[Docker] Warning: version tag push failed: %v\n%s", vErr, vOut)
+			// Non-fatal — :latest was already pushed successfully
+		} else {
+			log.Printf("[Docker] Successfully pushed version tag: %s", versionImage)
+		}
+	}
+
 	return fullImage, nil
 }
 
@@ -221,6 +246,9 @@ func BuildAndPush(req BuildRequest) BuildResult {
 	appendLog(fmt.Sprintf("Starting build for %s", req.RepoFullName))
 	appendLog(fmt.Sprintf("Commit: %s", req.CommitSHA[:7]))
 	appendLog(fmt.Sprintf("Image: %s", req.ImageName))
+	if req.VersionTag != "" {
+		appendLog(fmt.Sprintf("Version: %s", req.VersionTag))
+	}
 
 	dockerfilePath := req.DockerfilePath
 	if dockerfilePath == "" {
@@ -264,7 +292,7 @@ RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib
 
 	// Step 2: Build
 	appendLog("Building Docker image...")
-	if err := buildImage(cloneDir, req.ImageName, dockerfilePath); err != nil {
+	if err := buildImage(cloneDir, req.ImageName, dockerfilePath, req.VersionTag); err != nil {
 		appendLog("Build failed: " + err.Error())
 		cleanup(req.RepoFullName)
 		return BuildResult{
@@ -278,7 +306,7 @@ RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib
 
 	// Step 3: Push
 	appendLog("Pushing to registry...")
-	pushedImage, err := pushImage(req.ImageName)
+	pushedImage, err := pushImage(req.ImageName, req.VersionTag)
 	if err != nil {
 		appendLog("Push failed: " + err.Error())
 		cleanup(req.RepoFullName)
